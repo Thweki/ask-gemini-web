@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import path from 'node:path';
+import { settings } from '../dist/config.js';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const args = process.argv.slice(2);
@@ -13,12 +14,8 @@ const kind = option('--target') || 'both';
 const update = args.includes('--update');
 const skillName = 'ask-gemini-web';
 const source = path.join(root, 'skills', skillName);
-const project = existsSync(path.join(root, 'gemini-draft.config.json'))
-  ? JSON.parse(await readFile(path.join(root, 'gemini-draft.config.json'), 'utf8')) : {};
-const home = path.resolve(option('--home') || process.env.GEMINI_DRAFT_HOME || (project.home && path.resolve(root, project.home))
-  || (process.platform === 'win32' ? path.join(process.env.LOCALAPPDATA || os.homedir(), 'gemini-draft') : path.join(os.homedir(), '.local/share/gemini-draft')));
-const saved = existsSync(path.join(home, 'connection.json')) ? JSON.parse(await readFile(path.join(home, 'connection.json'), 'utf8')) : {};
-const endpoint = option('--cdp') || process.env.GEMINI_DRAFT_CDP || saved.endpoint || project.cdp || 'http://127.0.0.1:9222';
+const { home, endpoint, endpointSource } = settings({ home: option('--home') && path.resolve(option('--home')), cdp: option('--cdp') }, root);
+const explicitCdp = endpointSource === 'cli' || endpointSource === 'environment';
 const codexTarget = path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'skills', skillName);
 const agentsTarget = path.join(os.homedir(), '.agents/skills', skillName);
 const destination = option('--destination');
@@ -32,7 +29,7 @@ for (const target of targets) if (existsSync(target)) {
   if (!update) throw new Error(`Destination exists; use --update only for a recognized ${skillName} installation: ${target}`);
   const manifest = JSON.parse(await readFile(path.join(target, 'runtime/package.json'), 'utf8'));
   const instructions = await readFile(path.join(target, 'SKILL.md'), 'utf8');
-  if (manifest.name !== 'gemini-draft' || !/^name: (?:ask-gemini-web|gemini-draft)$/m.test(instructions)) throw new Error(`Not a recognized ${skillName} installation: ${target}`);
+  if (!['ask-gemini-web', 'gemini-draft'].includes(manifest.name) || !/^name: (?:ask-gemini-web|gemini-draft)$/m.test(instructions)) throw new Error(`Not a recognized ${skillName} installation: ${target}`);
 }
 
 function installDependencies(directory) {
@@ -57,8 +54,16 @@ for (const target of targets) {
   const lock = existsSync(path.join(root, 'package-lock.json')) ? 'package-lock.json' : 'npm-shrinkwrap.json';
   await cp(path.join(root, lock), path.join(runtime, 'package-lock.json'));
   await installDependencies(runtime);
-  const connection = { home: option('--home') || process.env.GEMINI_DRAFT_HOME ? home : previous.home || home,
-    endpoint: option('--cdp') || process.env.GEMINI_DRAFT_CDP ? endpoint : previous.endpoint || endpoint };
+  if (update && previousDirectory !== target && existsSync(previousConnection)) {
+    console.error('[deprecated] gemini-draft skill connection is deprecated; reusing its saved connection without moving the profile.');
+  }
+  const connection = { home: option('--home') || (process.env.ASK_GEMINI_WEB_HOME ?? process.env.GEMINI_DRAFT_HOME) ? home : previous.home || home };
+  if (explicitCdp) Object.assign(connection, { endpoint, explicitCdp: true });
+  else if (previous.endpoint) {
+    connection.endpoint = previous.endpoint;
+    // Unmarked connections from older installs are remembered, not explicit.
+    if (previous.explicitCdp === true) connection.explicitCdp = true;
+  }
   await writeFile(path.join(target, 'connection.json'), JSON.stringify(connection, null, 2) + '\n');
-  console.log(JSON.stringify({ installed: target, runner: path.join(target, 'scripts/gemini-draft.mjs'), ...connection }));
+  console.log(JSON.stringify({ installed: target, runner: path.join(target, 'scripts/ask-gemini-web.mjs'), ...connection }));
 }

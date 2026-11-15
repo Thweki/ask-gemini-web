@@ -1,4 +1,4 @@
-# 模型名称以 `gemini-draft models list` 的实际结果为准。
+# 模型名称以 `ask-gemini-web models list` 的实际结果为准。
 # 不填写 model 时，工具必须能确认网页当前选中的模型才会发送。
 promptFile: article.prompt.md
 variables:

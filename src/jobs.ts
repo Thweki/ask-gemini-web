@@ -293,6 +293,7 @@ async function work(config: Settings, store: RunStore, run: Run, notify: (messag
   if (run.state === 'complete' && run.output && run.lastError) run.state = 'collected';
   if (run.state === 'complete') return run;
   let connection: Connection | undefined;
+  let completed = false;
   try {
     if (run.state === 'collected') return await finish(store, run);
     const prompt = await store.prompt(run);
@@ -328,14 +329,15 @@ async function work(config: Settings, store: RunStore, run: Run, notify: (messag
       }
     }
     const result = await collect(gemini, store, run, prompt);
+    completed = true;
     try { await gemini.page.close(); }
     catch (error) { notify(`任务结果已保存，关闭任务标签页失败：${errorInfo(error).message}`); }
     return result;
   } catch (error) {
     run.lastError = errorInfo(error);
     await store.save(run);
-    throw new DraftError(run.lastError.code, `${run.lastError.message}\n任务 ID：${run.id}`, error instanceof DraftError ? error.exitCode : 1);
-  } finally { await connection?.disconnect(); }
+    throw new DraftError(run.lastError.code, `${run.lastError.message}${run.lastError.code.startsWith('AUTH_') && connection ? `\nCDP：${connection.endpoint}` : ''}\n任务 ID：${run.id}`, error instanceof DraftError ? error.exitCode : 1);
+  } finally { await connection?.disconnect(!completed && !['prepared', 'collected', 'complete'].includes(run.state)); }
 }
 
 export function runSummary(run: Run) {

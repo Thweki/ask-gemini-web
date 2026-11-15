@@ -1,16 +1,17 @@
-import { after, before, test } from 'node:test';
+import { after, before, test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { chromium, type Browser, type BrowserContext } from 'playwright-core';
-import { readFile, mkdtemp, writeFile, readdir, rm } from 'node:fs/promises';
+import { readFile, mkdtemp, writeFile, readdir, rm, access } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { createServer } from 'node:net';
 import { createHash } from 'node:crypto';
 import { Gemini } from '../src/gemini.js';
 import { Connection, endpointReady, GEMINI } from '../src/browser.js';
 import { compileJob, execute, loadJob, resume, RunStore } from '../src/jobs.js';
 import { settings } from '../src/config.js';
-import { previewSelection } from '../src/selection.js';
+import { previewSelection, selectForTask } from '../src/selection.js';
 
 let browser: Browser;
 const fixture = await readFile(new URL('./fixtures/gemini.html', import.meta.url), 'utf8');
@@ -132,18 +133,35 @@ test('thinking normalizes Standard/Extended and description labels, rejects unkn
 });
 
 test('successful CLI generation keeps stderr empty for compact/json/quiet modes', async t => {
+  let port: number | undefined;
+  for (const candidate of [9444, 9555]) {
+    const free = await new Promise<boolean>(resolve => {
+      const server = createServer();
+      server.once('error', () => resolve(false));
+      server.listen(candidate, '127.0.0.1', () => server.close(() => resolve(true)));
+    });
+    if (free) { port = candidate; break; }
+  }
+  if (!port) { t.skip('Isolated CDP ports 9444 and 9555 are unavailable.'); return; }
   const home = await mkdtemp(path.join(os.tmpdir(), 'gemini-cli-cdp-'));
   const ctx = await chromium.launchPersistentContext(path.join(home, 'test-profile'), {
-    channel: 'chrome', headless: true, args: ['--remote-debugging-port=0'],
+    channel: 'chrome', headless: true, args: [`--remote-debugging-port=${port}`, '--remote-debugging-address=127.0.0.1'],
   });
   try {
     await ctx.route('**/*', route => route.fulfill({ contentType: 'text/html', body: fixture }));
-    const port = (await readFile(path.join(home, 'test-profile', 'DevToolsActivePort'), 'utf8')).split('\n')[0];
     if (!await endpointReady(`http://127.0.0.1:${port}`)) {
       assert.ok(!process.env.CI, 'CI must allow the local HTTP CDP integration test.');
       t.skip('This sandbox blocks local HTTP CDP; run outside it to verify CLI transport.');
       return;
     }
+    const original = await page(ctx, 'https://gemini.google.com/app/original-agent-task');
+    const existingPages = ctx.pages();
+    const session = await ctx.newCDPSession(original);
+    let targetId: string;
+    try { targetId = (await session.send('Target.getTargetInfo')).targetInfo.targetId; }
+    finally { await session.detach(); }
+    const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json() as { id: string }[];
+    assert.ok(targets.some(target => target.id === targetId), 'CDP endpoint must belong to this throwaway Chrome.');
     const prompt = '请写一段青竹短文。';
     const job = path.join(home, 'job.json');
     await writeFile(job, JSON.stringify({ prompt }));
@@ -161,7 +179,127 @@ test('successful CLI generation keeps stderr empty for compact/json/quiet modes'
       assert.equal(result.state, 'complete');
       assert.equal(result.promptSha256, createHash('sha256').update(prompt).digest('hex'));
       if (flag === '--compact') assert.equal(stdout.trim().split('\n').length, 1);
+      assert.deepEqual(ctx.pages(), existingPages);
+      assert.equal(original.url(), 'https://gemini.google.com/app/original-agent-task');
+      assert.equal(await original.evaluate(() => (window as any).sendCount), 0);
     }
+    const signedOut = fixture.replace('<button aria-label="Google Account">Account</button>', '<a href="https://accounts.google.com">Sign in</a>');
+    await ctx.route('**/*', route => route.fulfill({ contentType: 'text/html', body: signedOut }));
+    for (const command of [['ready'], ['auth', 'status'], ['doctor']]) {
+      const child = spawn(process.execPath, ['--import', 'tsx', 'src/cli.ts', '--json', '--home', home,
+        '--cdp', `http://127.0.0.1:${port}`, ...command], { windowsHide: true });
+      let stdout = '', stderr = '';
+      child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk; });
+      child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
+      const closed = new Promise(resolve => child.once('close', resolve));
+      const timer = setTimeout(() => child.kill(), 25000);
+      try { assert.equal(await closed, 3, stdout + stderr); } finally { clearTimeout(timer); }
+      const result = JSON.parse(stdout);
+      assert.equal(result.endpoint, `http://127.0.0.1:${port}`);
+      assert.equal(result.next, 'ask-gemini-web login');
+      assert.equal(stderr, '');
+      assert.deepEqual(ctx.pages(), existingPages);
+      await assert.rejects(access(path.join(home, 'chrome-profile')), { code: 'ENOENT' });
+    }
+    for (const args of [['--timeout', '1'], ['--no-wait']]) {
+      const child = spawn(process.execPath, ['--import', 'tsx', 'src/cli.ts', '--json', '--home', home,
+        '--cdp', `http://127.0.0.1:${port}`, 'login', ...args], { windowsHide: true });
+      let stdout = '', stderr = '';
+      child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk; });
+      child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
+      const closed = new Promise(resolve => child.once('close', resolve));
+      const timer = setTimeout(() => child.kill(), 25000);
+      try { assert.equal(await closed, args[0] === '--timeout' ? 3 : 0, stdout + stderr); }
+      finally { clearTimeout(timer); }
+      if (args[0] === '--timeout') assert.equal(JSON.parse(stdout).error.code, 'LOGIN_TIMEOUT');
+      assert.equal(stderr, '');
+      const loginTabs = ctx.pages().filter(tab => !existingPages.includes(tab));
+      assert.equal(loginTabs.length, 1, 'Unfinished login keeps its task tab open.');
+      await loginTabs[0].close();
+      assert.deepEqual(ctx.pages(), existingPages);
+    }
+  } finally { await ctx.close(); await rm(home, { recursive: true, force: true, maxRetries: 5 }); }
+});
+
+test('real CDP disconnect preserves uncertain and incomplete tasks for resume without resending', async t => {
+  let port: number | undefined;
+  for (const candidate of [9444, 9555]) {
+    const free = await new Promise<boolean>(resolve => {
+      const server = createServer();
+      server.once('error', () => resolve(false));
+      server.listen(candidate, '127.0.0.1', () => server.close(() => resolve(true)));
+    });
+    if (free) { port = candidate; break; }
+  }
+  if (!port) { assert.ok(!process.env.CI, 'CI requires an isolated CDP port.'); t.skip('Isolated CDP ports unavailable.'); return; }
+  const home = await mkdtemp(path.join(os.tmpdir(), 'gemini-recovery-cdp-'));
+  const ctx = await chromium.launchPersistentContext(path.join(home, 'test-profile'), {
+    channel: 'chrome', headless: true, args: [`--remote-debugging-port=${port}`, '--remote-debugging-address=127.0.0.1'],
+  });
+  try {
+    await ctx.route('**/*', route => route.fulfill({ contentType: 'text/html', body: fixture }));
+    const cfg = settings({ home, cdp: `http://127.0.0.1:${port}` });
+    if (!await endpointReady(cfg.endpoint)) {
+      assert.ok(!process.env.CI, 'CI must allow the local HTTP CDP recovery test.');
+      t.skip('Sandbox blocks local HTTP CDP.'); return;
+    }
+    const userTab = await page(ctx, GEMINI + '/original-user-tab');
+    const existing = ctx.pages();
+    const originalSubmit = Gemini.prototype.submit;
+    const store = new RunStore(cfg);
+    for (const failure of ['unconfirmed', 'collection']) {
+      const injected = failure === 'unconfirmed'
+        ? mock.method(Gemini.prototype, 'submit', async function (this: Gemini, send: Parameters<Gemini['submit']>[0]) {
+          await originalSubmit.call(this, send); throw new Error('Lost send confirmation');
+        })
+        : mock.method(Gemini.prototype, 'progress', async () => { throw new Error('Collection interrupted'); });
+      const before = await readdir(cfg.runs).catch(() => [] as string[]);
+      try {
+        await assert.rejects(execute(cfg, await compileJob({ prompt: `Recover ${failure}` }), () => {}, Connection.open),
+          failure === 'unconfirmed' ? /Lost send confirmation/ : /Collection interrupted/);
+      } finally { injected.mock.restore(); }
+      const id = (await readdir(cfg.runs)).find(id => !before.includes(id))!;
+      const run = await store.read(id);
+      if (failure === 'unconfirmed') {
+        assert.equal(run.state, 'submit_intent');
+        assert.equal(run.conversationUrl, undefined);
+      } else assert.equal(run.state, 'submitted');
+      const taskTabs = ctx.pages().filter(tab => !existing.includes(tab));
+      assert.equal(taskTabs.length, 1, 'Real disconnect must retain the original task tab.');
+      assert.equal(await taskTabs[0].evaluate(() => (window as any).sendCount), 1);
+      const total = await userTab.evaluate(() => localStorage.getItem('totalSends'));
+      assert.equal((await resume(cfg, id, () => {}, Connection.open)).state, 'complete');
+      assert.deepEqual(ctx.pages(), existing);
+      assert.equal(await userTab.evaluate(() => localStorage.getItem('totalSends')), total);
+    }
+    const sendFailure = mock.method(Gemini.prototype, 'sendButton', async () => { throw new Error('Before send'); });
+    try {
+      await assert.rejects(execute(cfg, await compileJob({ prompt: 'Never sent' }), () => {}, Connection.open), /Before send/);
+      assert.deepEqual(ctx.pages(), existing, 'A certain pre-send failure closes its task tab.');
+    } finally { sendFailure.mock.restore(); }
+    const output = path.join(home, 'draft.md');
+    const exportFailure = mock.method(Gemini.prototype, 'submit', async function (this: Gemini, send: Parameters<Gemini['submit']>[0]) {
+      await originalSubmit.call(this, send);
+      await writeFile(output, 'Concurrent user file');
+    });
+    const before = await readdir(cfg.runs);
+    try {
+      await assert.rejects(execute(cfg, await compileJob({ prompt: 'Save before export', output }), () => {}, Connection.open), { code: 'OUTPUT_EXISTS' });
+    } finally { exportFailure.mock.restore(); }
+    const id = (await readdir(cfg.runs)).find(id => !before.includes(id))!;
+    const collected = await store.read(id);
+    assert.equal(collected.state, 'collected');
+    assert.match(await readFile(collected.result!, 'utf8'), /Fixture draft/);
+    assert.deepEqual(ctx.pages(), existing, 'A saved result closes its task tab even when export fails.');
+    const total = await userTab.evaluate(() => localStorage.getItem('totalSends'));
+    await rm(output);
+    const noBrowser = async (): Promise<never> => { throw new Error('Must not reconnect'); };
+    assert.equal((await resume(cfg, id, () => {}, noBrowser)).state, 'complete');
+    assert.match(await readFile(output, 'utf8'), /Fixture draft/);
+    assert.deepEqual(ctx.pages(), existing);
+    assert.equal(await userTab.evaluate(() => localStorage.getItem('totalSends')), total);
+    assert.equal(userTab.url(), GEMINI + '/original-user-tab');
+    assert.equal(await userTab.evaluate(() => (window as any).sendCount), 0);
   } finally { await ctx.close(); await rm(home, { recursive: true, force: true, maxRetries: 5 }); }
 });
 
@@ -286,7 +424,7 @@ test('model selection is rejected when the webpage ignores the click', async () 
 
 test('submission collects Markdown and completed resume never sends again', async () => {
   const ctx = await context();
-  const home = await mkdtemp(path.join(os.tmpdir(), 'gemini-draft-e2e-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'ask-gemini-web-e2e-'));
   try {
     const filename = path.join(home, 'job.yaml');
     await writeFile(filename, 'prompt: Write an article\nmodel: Test Reasoning');
@@ -304,7 +442,7 @@ test('submission collects Markdown and completed resume never sends again', asyn
 
 test('lost click acknowledgement resumes original response without duplicate submission', async () => {
   const ctx = await context();
-  const home = await mkdtemp(path.join(os.tmpdir(), 'gemini-draft-resume-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'ask-gemini-web-resume-'));
   const original = Gemini.prototype.submit;
   try {
     const filename = path.join(home, 'job.yaml');
@@ -350,7 +488,7 @@ test('resume opens and closes its own recovery tab when the original target is g
 
 test('ambiguous submission with no original page cannot resend', async () => {
   const ctx = await context();
-  const home = await mkdtemp(path.join(os.tmpdir(), 'gemini-draft-uncertain-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'ask-gemini-web-uncertain-'));
   try {
     const filename = path.join(home, 'job.yaml');
     await writeFile(filename, 'prompt: Never duplicate');
@@ -364,7 +502,7 @@ test('ambiguous submission with no original page cannot resend', async () => {
 
 test('existing output is rejected before creating a task tab or submitting', async () => {
   const ctx = await context();
-  const home = await mkdtemp(path.join(os.tmpdir(), 'gemini-draft-existing-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'ask-gemini-web-existing-'));
   try {
     const filename = path.join(home, 'job.yaml');
     await writeFile(filename, 'prompt: Preserve my file\noutput: draft.md');
@@ -402,7 +540,7 @@ test('export failure after generation leaves a collected result for browser-free
 
 test('restored old conversation after model selection is rejected before submit', async () => {
   const ctx = await context();
-  const home = await mkdtemp(path.join(os.tmpdir(), 'gemini-draft-drift-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'ask-gemini-web-drift-'));
   const original = Gemini.prototype.selectThinking;
   try {
     const filename = path.join(home, 'job.yaml');
@@ -415,4 +553,110 @@ test('restored old conversation after model selection is rejected before submit'
     await assert.rejects(execute(settings({ home }), await loadJob(filename), () => {}, factory(ctx)), { code: 'EXPECTED_NEW_CHAT' });
     assert.equal(await ctx.pages()[0].evaluate(() => (window as any).sendCount), 0);
   } finally { Gemini.prototype.selectThinking = original; await ctx.close(); await rm(home, { recursive: true, force: true, maxRetries: 5 }); }
+});
+
+test('Chinese combined mode picker is found by its label or parent marker without aria-controls', async () => {
+  const html = await readFile(new URL('./fixtures/gemini-gem-menu.html', import.meta.url), 'utf8');
+  for (const via of ['label', 'parent']) {
+    const ctx = await context(html);
+    try {
+      const p = await page(ctx); const gemini = new Gemini(p);
+      if (via === 'label') await p.locator('gem-button').evaluate(element => element.removeAttribute('data-test-id'));
+      else await p.locator('gem-button button').evaluate(element => element.removeAttribute('aria-label'));
+      const result = await gemini.models();
+      assert.equal(result.current, '4 Hydrogen');
+      assert.deepEqual(result.models.map(model => model.id), ['3-5-flash-lite', '4-hydrogen', '3-1-pro', '4-argon', '4-carbon']);
+      assert.equal(result.models[1].mode, '日常帮助');
+      assert.equal(result.models[4].availability, 'unavailable');
+      assert.equal((await gemini.selectModel('4-argon')).name, '4 Argon');
+      assert.equal((await gemini.models()).current, '4 Argon');
+      await assert.rejects(gemini.selectModel('4-carbon'), { code: 'MODEL_UNAVAILABLE' });
+      assert.equal(await p.evaluate(() => (window as any).sendCount), 0);
+    } finally { await ctx.close(); }
+  }
+});
+
+test('Chinese picker tolerates ignored Escape, delayed dismissal and an already-open menu in Playwright', async () => {
+  const html = await readFile(new URL('./fixtures/gemini-gem-menu.html', import.meta.url), 'utf8');
+  for (const scenario of [
+    { ignoreEscape: true, delay: 0, alreadyOpen: false },
+    { ignoreEscape: false, delay: 75, alreadyOpen: false },
+    { ignoreEscape: true, delay: 0, alreadyOpen: true },
+    { ignoreEscape: false, delay: 75, alreadyOpen: true },
+  ]) {
+    const ctx = await context(html);
+    try {
+      const p = await page(ctx); const gemini = new Gemini(p);
+      await p.evaluate(({ ignoreEscape, delay }) => {
+        (window as any).ignoreMenuEscape = ignoreEscape;
+        (window as any).menuEscapeDelay = delay;
+      }, scenario);
+      if (scenario.alreadyOpen) await p.locator('gem-button button').click();
+      for (let i = 0; i < 2; i++) {
+        assert.equal((await gemini.models()).current, '4 Hydrogen');
+        assert.equal(await p.locator('gem-menu').isVisible(), scenario.ignoreEscape);
+      }
+      assert.equal(await p.evaluate(() => (window as any).modelTriggerClicks), scenario.ignoreEscape ? 1 : 2);
+      assert.equal((await gemini.selectModel('4 Argon')).name, '4 Argon');
+      assert.equal((await gemini.models()).current, '4 Argon');
+      const selection = await selectForTask(gemini, { taskText: 'Write an article', model: '4 Hydrogen', thinking: 'high' });
+      assert.equal(selection.model.name, '4 Hydrogen');
+      assert.equal(selection.thinking.id, 'high');
+      assert.equal(await p.evaluate(() => (window as any).sendCount), 0);
+    } finally { await ctx.close(); }
+  }
+});
+
+test('Chinese inline thinking uses only its expanded section and never becomes a model option', async () => {
+  const html = await readFile(new URL('./fixtures/gemini-gem-menu.html', import.meta.url), 'utf8');
+  const ctx = await context(html);
+  try {
+    const p = await page(ctx); const gemini = new Gemini(p);
+    assert.equal((await gemini.thinking()).current, 'medium');
+    assert.deepEqual((await gemini.thinking()).levels.map(level => level.id), ['low', 'medium', 'high']);
+    for (const [label, id] of [['低', 'low'], ['高', 'high'], ['中', 'medium']]) {
+      assert.equal((await gemini.selectThinking(label)).id, id);
+      assert.equal((await gemini.thinking()).current, id);
+    }
+    await p.locator('[value="thinking_level"]').evaluate(element => {
+      element.setAttribute('aria-expanded', 'true');
+      (element.querySelector('.thinking-levels') as HTMLElement).hidden = false;
+    });
+    assert.equal((await gemini.models()).models.length, 5);
+    await assert.rejects(gemini.selectThinking('xhigh'), { code: 'THINKING_UNAVAILABLE' });
+    assert.equal(await p.evaluate(() => (window as any).sendCount), 0);
+  } finally { await ctx.close(); }
+});
+
+test('combined Hydrogen 中 trigger verifies current model and thinking using text or aria-label', async () => {
+  const html = await readFile(new URL('./fixtures/gemini-gem-menu.html', import.meta.url), 'utf8');
+  const ctx = await context(html);
+  try {
+    const p = await page(ctx); const gemini = new Gemini(p);
+    await p.locator('[aria-checked]').evaluateAll(elements => elements.forEach(element => element.removeAttribute('aria-checked')));
+    assert.equal((await gemini.models()).current, '4 Hydrogen');
+    assert.equal((await gemini.thinking()).current, 'medium');
+    await p.locator('gem-button button').evaluate(element => { element.textContent = ''; });
+    assert.equal((await gemini.models()).current, '4 Hydrogen');
+    assert.equal((await gemini.thinking()).current, 'medium');
+    assert.equal(await p.evaluate(() => (window as any).sendCount), 0);
+  } finally { await ctx.close(); }
+});
+
+test('combined picker rejects ambiguous menus and never falls back from invalid aria-controls', async () => {
+  const html = await readFile(new URL('./fixtures/gemini-gem-menu.html', import.meta.url), 'utf8');
+  const ctx = await context(html);
+  try {
+    const p = await page(ctx); const gemini = new Gemini(p);
+    await p.locator('gem-menu').evaluate(element => {
+      (element as HTMLElement).hidden = false;
+      const other = element.cloneNode(true) as HTMLElement;
+      other.id = 'ambiguous-menu'; other.hidden = false; element.parentElement!.append(other);
+    });
+    await assert.rejects(gemini.models(), { code: 'AMBIGUOUS_UI' });
+    await p.locator('#ambiguous-menu').evaluate(element => element.remove());
+    await p.locator('gem-button button').evaluate(element => element.setAttribute('aria-controls', 'invalid id'));
+    await assert.rejects(gemini.models(), { code: 'MODEL_MENU_UNKNOWN' });
+    assert.equal(await p.evaluate(() => (window as any).sendCount), 0);
+  } finally { await ctx.close(); }
 });

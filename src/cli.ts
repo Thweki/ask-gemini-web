@@ -16,7 +16,10 @@ program.exitOverride().configureOutput({
 });
 process.once('SIGINT', () => shutdown.abort(new DraftError('INTERRUPTED', '操作已中断，Chrome 与任务记录已保留。', 130)));
 process.once('SIGTERM', () => shutdown.abort(new DraftError('INTERRUPTED', '操作已中断，Chrome 与任务记录已保留。', 143)));
-program.name('gemini-draft').version('0.2.1')
+if (/^gemini-draft(?:\.(?:mjs|js|cmd|exe))?$/.test(path.basename(process.argv[1] || ''))) {
+  console.error('[deprecated] gemini-draft is deprecated; use ask-gemini-web.');
+}
+program.name('ask-gemini-web').version('0.2.1')
   .description('通过本机 Chrome CDP 复现 Gemini 网页写稿流程；运行时不调用额外模型 API。')
   .option('--cdp <url>', '本机 Chrome CDP 地址（默认使用保存的配置）')
   .option('--home <path>', '专用配置与任务数据目录')
@@ -29,7 +32,7 @@ const config = () => settings(program.opts());
 const info = (message: string) => { if (!machineOutput() && !program.opts().quiet) console.error(message); };
 function report(data: unknown) { console.log(JSON.stringify(data, null, program.opts().compact ? undefined : 2)); }
 async function connected<T>(action: (connection: Connection) => Promise<T>) {
-  const connection = await Connection.open(config());
+  const connection = await Connection.ensure(config());
   try { return await action(connection); } finally { await connection.disconnect(); }
 }
 async function locked<T>(action: () => Promise<T>) { return new RunStore(config()).lock(action); }
@@ -39,7 +42,7 @@ function seconds(value: string) {
   return number;
 }
 
-const browser = program.command('browser').description('管理专用 Chrome');
+const browser = program.command('browser').description('复用或启动本机 Chrome');
 browser.command('start').option('--chrome <path>', 'Chrome 可执行文件').action(async options => {
   report(await locked(() => startChrome(config(), options.chrome)));
 });
@@ -50,12 +53,11 @@ browser.command('path').description('显示 Chrome、profile 和 CDP 配置').ac
 program.command('ready').description('按保存的配置启动 Chrome，检查登录与可用模型；不发送提示词')
   .action(async () => locked(async () => {
     const cfg = config();
-    const started = await startChrome(cfg);
     await connected(async connection => {
       const gemini = new Gemini(await connection.page());
       const auth = await gemini.waitForAuth();
       if (auth.status !== 'logged_in') {
-        report({ ready: false, auth, profile: cfg.profile, browser: started, next: 'gemini-draft login' });
+        report({ ready: false, code: `AUTH_${auth.status.toUpperCase()}`, auth, endpoint: connection.endpoint, profile: cfg.profile, browser: connection.browserInfo, next: 'ask-gemini-web login' });
         process.exitCode = 3;
         return;
       }
@@ -63,38 +65,40 @@ program.command('ready').description('按保存的配置启动 Chrome，检查�
     });
   }));
 
-program.command('login').description('打开专用 Chrome，由用户在 Google 官方页面手动登录')
+program.command('login').description('复用或启动 Chrome，由用户在 Google 官方页面手动登录')
   .option('--chrome <path>', 'Chrome 可执行文件')
   .option('--timeout <seconds>', '等待手动登录的秒数', seconds, 300)
   .option('--no-wait', '打开浏览器并显示登录指引后立即返回')
   .action(async options => locked(async () => {
     const cfg = config();
-    const started = await startChrome(cfg, options.chrome);
-    info('请在专用 Chrome 中打开的 Gemini / accounts.google.com 页面手动登录。');
-    info('本工具不会索取、输入或导出密码、验证码、通行密钥或 Cookie，也不会自动同意条款。');
-    info(`配置的 Chrome 专用目录：${cfg.profile}`);
-    if (!started.started) info('正在复用已有 CDP 浏览器，实际登录态目录由该 Chrome 的启动配置决定。');
-    info('登录完成后可关闭 CLI，保留 Chrome 供后续命令复用。');
-    if (!options.wait) { report({ ...started, next: 'gemini-draft auth status' }); return; }
-    await connected(async connection => {
+    const connection = await Connection.ensure(cfg, options.chrome);
+    let loggedIn = false;
+    try {
+      const started = connection.browserInfo;
       const page = await connection.page();
+      info('请在本次打开的 Gemini / accounts.google.com 标签页手动登录。');
+      info('本工具不会索取、输入或导出密码、验证码、通行密钥或 Cookie，也不会自动同意条款。');
+      info(`配置的 Chrome 专用目录：${cfg.profile}`);
+      if (!started.started) info('正在复用已有 CDP 浏览器，实际登录态目录由该 Chrome 的启动配置决定。');
+      info('登录完成后可关闭 CLI，保留 Chrome 供后续命令复用。');
+      if (!options.wait) { report({ ...started, next: 'ask-gemini-web auth status' }); return; }
       await page.bringToFront();
       const gemini = new Gemini(page);
       const deadline = Date.now() + options.timeout * 1000;
       let previous = '';
       while (Date.now() < deadline) {
         const auth = await gemini.auth();
-        if (auth.status === 'logged_in') { report(auth); return; }
+        if (auth.status === 'logged_in') { loggedIn = true; report(auth); return; }
         if (auth.status !== previous) { info(`${auth.status}：${auth.reason}`); previous = auth.status; }
         await pause(1000);
       }
       throw new DraftError('LOGIN_TIMEOUT', '等待登录超时，Chrome 已保留。完成登录后运行 auth status。', 3);
-    });
+    } finally { await connection.disconnect(!loggedIn); }
   }));
 
 program.command('auth').description('登录状态').command('status').action(async () => locked(async () => {
-  const auth = await connected(async connection => new Gemini(await connection.page()).waitForAuth());
-  report(auth);
+  const auth = await connected(async connection => ({ ...await new Gemini(await connection.page()).waitForAuth(), endpoint: connection.endpoint }));
+  report({ ...auth, ...(auth.status !== 'logged_in' ? { code: `AUTH_${auth.status.toUpperCase()}`, next: 'ask-gemini-web login' } : {}) });
   if (auth.status !== 'logged_in') process.exitCode = 3;
 }));
 
@@ -127,7 +131,8 @@ program.command('doctor').description('检测 CDP、登录状态和页面适配�
         try { modelDetection = { status: 'ok', ...await gemini.models() }; }
         catch (error) { modelDetection = { status: 'failed', error: errorInfo(error) }; process.exitCode = 4; }
       }
-      return { endpoint: cfg.endpoint, chrome, profile: cfg.profile, ...diagnostics, modelDetection };
+      if (diagnostics.auth.status !== 'logged_in') process.exitCode = 3;
+      return { endpoint: connection.endpoint, chrome, profile: cfg.profile, ...diagnostics, modelDetection, next: diagnostics.auth.status !== 'logged_in' ? 'ask-gemini-web login' : undefined };
     }));
   }));
 
