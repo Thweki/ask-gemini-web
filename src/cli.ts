@@ -72,6 +72,7 @@ program.command('login').description('复用或启动 Chrome，由用户在 Goog
   .action(async options => locked(async () => {
     const cfg = config();
     const connection = await Connection.ensure(cfg, options.chrome);
+    let loggedIn = false;
     try {
       const started = connection.browserInfo;
       const page = await connection.page();
@@ -87,12 +88,12 @@ program.command('login').description('复用或启动 Chrome，由用户在 Goog
       let previous = '';
       while (Date.now() < deadline) {
         const auth = await gemini.auth();
-        if (auth.status === 'logged_in') { report(auth); return; }
+        if (auth.status === 'logged_in') { loggedIn = true; report(auth); return; }
         if (auth.status !== previous) { info(`${auth.status}：${auth.reason}`); previous = auth.status; }
         await pause(1000);
       }
       throw new DraftError('LOGIN_TIMEOUT', '等待登录超时，Chrome 已保留。完成登录后运行 auth status。', 3);
-    } finally { await connection.disconnect(!options.wait); }
+    } finally { await connection.disconnect(!loggedIn); }
   }));
 
 program.command('auth').description('登录状态').command('status').action(async () => locked(async () => {

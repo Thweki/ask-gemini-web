@@ -1,4 +1,4 @@
-import { after, before, test } from 'node:test';
+import { after, before, test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { chromium, type Browser, type BrowserContext } from 'playwright-core';
 import { readFile, mkdtemp, writeFile, readdir, rm, access } from 'node:fs/promises';
@@ -201,6 +201,84 @@ test('successful CLI generation keeps stderr empty for compact/json/quiet modes'
       assert.deepEqual(ctx.pages(), existingPages);
       await assert.rejects(access(path.join(home, 'chrome-profile')), { code: 'ENOENT' });
     }
+    for (const args of [['--timeout', '1'], ['--no-wait']]) {
+      const child = spawn(process.execPath, ['--import', 'tsx', 'src/cli.ts', '--json', '--home', home,
+        '--cdp', `http://127.0.0.1:${port}`, 'login', ...args], { windowsHide: true });
+      let stdout = '', stderr = '';
+      child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk; });
+      child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
+      const closed = new Promise(resolve => child.once('close', resolve));
+      const timer = setTimeout(() => child.kill(), 25000);
+      try { assert.equal(await closed, args[0] === '--timeout' ? 3 : 0, stdout + stderr); }
+      finally { clearTimeout(timer); }
+      if (args[0] === '--timeout') assert.equal(JSON.parse(stdout).error.code, 'LOGIN_TIMEOUT');
+      assert.equal(stderr, '');
+      const loginTabs = ctx.pages().filter(tab => !existingPages.includes(tab));
+      assert.equal(loginTabs.length, 1, 'Unfinished login keeps its task tab open.');
+      await loginTabs[0].close();
+      assert.deepEqual(ctx.pages(), existingPages);
+    }
+  } finally { await ctx.close(); await rm(home, { recursive: true, force: true, maxRetries: 5 }); }
+});
+
+test('real CDP disconnect preserves uncertain and incomplete tasks for resume without resending', async t => {
+  let port: number | undefined;
+  for (const candidate of [9444, 9555]) {
+    const free = await new Promise<boolean>(resolve => {
+      const server = createServer();
+      server.once('error', () => resolve(false));
+      server.listen(candidate, '127.0.0.1', () => server.close(() => resolve(true)));
+    });
+    if (free) { port = candidate; break; }
+  }
+  if (!port) { assert.ok(!process.env.CI, 'CI requires an isolated CDP port.'); t.skip('Isolated CDP ports unavailable.'); return; }
+  const home = await mkdtemp(path.join(os.tmpdir(), 'gemini-recovery-cdp-'));
+  const ctx = await chromium.launchPersistentContext(path.join(home, 'test-profile'), {
+    channel: 'chrome', headless: true, args: [`--remote-debugging-port=${port}`, '--remote-debugging-address=127.0.0.1'],
+  });
+  try {
+    await ctx.route('**/*', route => route.fulfill({ contentType: 'text/html', body: fixture }));
+    const cfg = settings({ home, cdp: `http://127.0.0.1:${port}` });
+    if (!await endpointReady(cfg.endpoint)) {
+      assert.ok(!process.env.CI, 'CI must allow the local HTTP CDP recovery test.');
+      t.skip('Sandbox blocks local HTTP CDP.'); return;
+    }
+    const userTab = await page(ctx, GEMINI + '/original-user-tab');
+    const existing = ctx.pages();
+    const originalSubmit = Gemini.prototype.submit;
+    const store = new RunStore(cfg);
+    for (const failure of ['unconfirmed', 'collection']) {
+      const injected = failure === 'unconfirmed'
+        ? mock.method(Gemini.prototype, 'submit', async function (this: Gemini, send: Parameters<Gemini['submit']>[0]) {
+          await originalSubmit.call(this, send); throw new Error('Lost send confirmation');
+        })
+        : mock.method(Gemini.prototype, 'progress', async () => { throw new Error('Collection interrupted'); });
+      const before = await readdir(cfg.runs).catch(() => [] as string[]);
+      try {
+        await assert.rejects(execute(cfg, await compileJob({ prompt: `Recover ${failure}` }), () => {}, Connection.open),
+          failure === 'unconfirmed' ? /Lost send confirmation/ : /Collection interrupted/);
+      } finally { injected.mock.restore(); }
+      const id = (await readdir(cfg.runs)).find(id => !before.includes(id))!;
+      const run = await store.read(id);
+      if (failure === 'unconfirmed') {
+        assert.equal(run.state, 'submit_intent');
+        assert.equal(run.conversationUrl, undefined);
+      } else assert.equal(run.state, 'submitted');
+      const taskTabs = ctx.pages().filter(tab => !existing.includes(tab));
+      assert.equal(taskTabs.length, 1, 'Real disconnect must retain the original task tab.');
+      assert.equal(await taskTabs[0].evaluate(() => (window as any).sendCount), 1);
+      const total = await userTab.evaluate(() => localStorage.getItem('totalSends'));
+      assert.equal((await resume(cfg, id, () => {}, Connection.open)).state, 'complete');
+      assert.deepEqual(ctx.pages(), existing);
+      assert.equal(await userTab.evaluate(() => localStorage.getItem('totalSends')), total);
+    }
+    const sendFailure = mock.method(Gemini.prototype, 'sendButton', async () => { throw new Error('Before send'); });
+    try {
+      await assert.rejects(execute(cfg, await compileJob({ prompt: 'Never sent' }), () => {}, Connection.open), /Before send/);
+      assert.deepEqual(ctx.pages(), existing, 'A certain pre-send failure closes its task tab.');
+    } finally { sendFailure.mock.restore(); }
+    assert.equal(userTab.url(), GEMINI + '/original-user-tab');
+    assert.equal(await userTab.evaluate(() => (window as any).sendCount), 0);
   } finally { await ctx.close(); await rm(home, { recursive: true, force: true, maxRetries: 5 }); }
 });
 

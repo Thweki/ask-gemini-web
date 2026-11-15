@@ -25,19 +25,34 @@ export function settings(options: { cdp?: string; home?: string }, directory = p
     try { project = z.object({ home: z.string().min(1).optional(), cdp: z.string().optional() }).strict().parse(JSON.parse(readFileSync(projectFile, 'utf8'))); }
     catch { throw new DraftError('INVALID_CONFIG', `无法解析项目配置：${projectFile}`); }
   }
-  const home = path.resolve(directory, options.home || environment('HOME') || project.home || defaultHome(directory));
+  const explicitHome = options.home || environment('HOME');
+  const home = explicitHome ? path.resolve(directory, explicitHome)
+    : project.home ? projectHome(path.resolve(directory, project.home)) : defaultHome(directory);
   let remembered: { endpoint?: string } = {};
   const connectionFile = path.join(home, 'connection.json');
   if (existsSync(connectionFile)) {
     try { remembered = z.object({ endpoint: z.string() }).strict().parse(JSON.parse(readFileSync(connectionFile, 'utf8'))); }
     catch { throw new DraftError('INVALID_CONFIG', `无法解析已保存连接：${connectionFile}`); }
   }
+  const environmentCdp = options.cdp ? undefined : environment('CDP');
+  const endpointSource: 'cli' | 'environment' | 'remembered' | 'project' | 'default' = options.cdp ? 'cli' : environmentCdp ? 'environment'
+    : remembered.endpoint ? 'remembered' : project.cdp ? 'project' : 'default';
   return {
     home,
     profile: path.join(home, 'chrome-profile'),
     runs: path.join(home, 'runs'),
-    endpoint: localEndpoint(options.cdp || environment('CDP') || remembered.endpoint || project.cdp || 'http://127.0.0.1:9222'),
+    endpoint: localEndpoint(options.cdp || environmentCdp || remembered.endpoint || project.cdp || 'http://127.0.0.1:9222'),
+    endpointSource,
   };
+}
+
+function projectHome(home: string) {
+  const name = path.basename(home);
+  if (!existsSync(home) && ['.ask-gemini-web', 'ask-gemini-web'].includes(name)) {
+    const legacy = path.join(path.dirname(home), name.replace('ask-gemini-web', 'gemini-draft'));
+    if (existsSync(legacy)) { deprecated(legacy, home); return legacy; }
+  }
+  return home;
 }
 
 export function defaultHome(directory = process.cwd(), userHome = os.homedir(), platform = process.platform) {

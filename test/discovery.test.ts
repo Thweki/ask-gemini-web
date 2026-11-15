@@ -4,13 +4,13 @@ import { mkdtemp, mkdir, readFile, writeFile, stat, rm, access } from 'node:fs/p
 import os from 'node:os';
 import path from 'node:path';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright-core';
-import { chromeProcessHints, Connection, devToolsEndpoint, discoverEndpoint, endpointReady, launchChrome, startChrome } from '../src/browser.js';
+import { chromeProcessHints, Connection, devToolsEndpoint, discoverEndpoint, endpointReady, launchChrome, startChrome, processHints } from '../src/browser.js';
 import { Gemini } from '../src/gemini.js';
 import type { Settings } from '../src/config.js';
 
 async function temporary(action: (config: Settings) => Promise<void>) {
   const home = await mkdtemp(path.join(os.tmpdir(), 'gemini-discovery-'));
-  try { await action({ home, profile: path.join(home, 'chrome-profile'), runs: path.join(home, 'runs'), endpoint: 'http://127.0.0.1:9555' }); }
+  try { await action({ home, profile: path.join(home, 'chrome-profile'), runs: path.join(home, 'runs'), endpoint: 'http://127.0.0.1:9555', endpointSource: 'default' }); }
   finally { await rm(home, { recursive: true, force: true }); }
 }
 const noProcesses = async () => ({ profiles: [], endpoints: [] });
@@ -63,6 +63,7 @@ test('endpointReady rejects remote HTTP before making any request and remote web
 
 test('reachable browser is remembered privately without creating a profile or launching', async () => temporary(async cfg => {
   const result = await startChrome(cfg, undefined, undefined, {
+    ready: endpointReady,
     discover: async () => 'http://127.0.0.1:9444', launch: async () => { throw new Error('Must not launch'); },
   });
   assert.deepEqual(result, { started: false, endpoint: 'http://127.0.0.1:9444' });
@@ -70,6 +71,76 @@ test('reachable browser is remembered privately without creating a profile or la
   if (process.platform !== 'win32') assert.equal((await stat(path.join(cfg.home, 'connection.json'))).mode & 0o777, 0o600);
   await assert.rejects(access(cfg.profile), { code: 'ENOENT' });
 }));
+
+test('explicit endpoints fail closed without discovery, launch or connection changes', async () => temporary(async cfg => {
+  const file = path.join(cfg.home, 'connection.json');
+  const original = '{"endpoint":"http://127.0.0.1:9444"}\n';
+  await writeFile(file, original);
+  for (const endpointSource of ['cli', 'environment'] as const) {
+    const explicit = { ...cfg, endpointSource };
+    let probes = 0;
+    const ready = async (endpoint: string) => { probes++; assert.equal(endpoint, cfg.endpoint); return false; };
+    const forbidden = async (): Promise<never> => { assert.fail('Must not discover or launch'); };
+    await assert.rejects(startChrome(explicit, undefined, undefined, { ready, discover: forbidden, launch: forbidden }), error => {
+      assert.equal((error as any).code, 'CDP_UNAVAILABLE');
+      assert.equal((error as any).exitCode, 2);
+      assert.match((error as Error).message, /9555.*Chrome.*--cdp/);
+      return true;
+    });
+    assert.equal(probes, 1);
+    assert.equal(await readFile(file, 'utf8'), original);
+    await assert.rejects(discoverEndpoint(explicit, { ready, processes: forbidden }), { code: 'CDP_UNAVAILABLE' });
+    assert.equal(probes, 2);
+    await assert.rejects(access(cfg.profile), { code: 'ENOENT' });
+  }
+  const forbidden = async (): Promise<never> => { assert.fail('Must not discover or launch'); };
+  assert.deepEqual(await startChrome({ ...cfg, endpointSource: 'cli' }, undefined, undefined, {
+    ready: async endpoint => endpoint === cfg.endpoint, discover: forbidden, launch: forbidden,
+  }), { started: false, endpoint: cfg.endpoint });
+}));
+
+test('implicit remembered, project and default endpoints still discover or launch', async () => temporary(async cfg => {
+  for (const endpointSource of ['remembered', 'project', 'default'] as const) {
+    for (const reachable of [false, true]) {
+      let discoveries = 0, launches = 0;
+      const result = await startChrome({ ...cfg, endpointSource }, undefined, undefined, {
+        ready: async () => { assert.fail('Implicit endpoints use discovery'); },
+        discover: async () => { discoveries++; return reachable ? 'http://127.0.0.1:9444' : undefined; },
+        launch: async () => { launches++; return { started: true, endpoint: 'http://127.0.0.1:9444', profile: cfg.profile }; },
+      });
+      assert.equal(discoveries, 1);
+      assert.equal(launches, reachable ? 0 : 1);
+      assert.equal(result.started, !reachable);
+      assert.equal(JSON.parse(await readFile(path.join(cfg.home, 'connection.json'), 'utf8')).endpoint, result.endpoint);
+    }
+  }
+}));
+
+test('macOS and Windows process hints preserve profile paths with spaces and only accept local ports', async () => {
+  const mac = '/Users/test/Library/Application Support/Google/Chrome';
+  const executable = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+  for (const profile of [mac, `"${mac}"`]) {
+    const hints = await processHints('darwin', async (file, args) => {
+      assert.equal(file, 'ps'); assert.deepEqual(args, ['-ax', '-o', 'command=']);
+      return `${executable} --user-data-dir=${profile} --remote-debugging-port=9444\n/usr/bin/other --remote-debugging-port=9555`;
+    });
+    assert.deepEqual(hints, { profiles: [mac], endpoints: ['http://127.0.0.1:9444'] });
+  }
+  const profile = 'C:\\Users\\test\\Local Data\\Chrome';
+  const command = `"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --user-data-dir="${profile}" --remote-debugging-port=9555`;
+  for (const output of [JSON.stringify(command), JSON.stringify([command, null, 'other.exe --remote-debugging-port=9222'])]) {
+    assert.deepEqual(await processHints('win32', async (file, args) => {
+      assert.equal(file, 'powershell.exe'); assert.ok(args.includes('-NoProfile'));
+      assert.match(args.at(-1)!, /Get-CimInstance Win32_Process/);
+      return output;
+    }), { profiles: [profile], endpoints: ['http://127.0.0.1:9555'] });
+  }
+  assert.deepEqual(await processHints('win32', async () => JSON.stringify(`${command} https://gemini.google.com/app`)),
+    { profiles: [profile], endpoints: ['http://127.0.0.1:9555'] });
+  assert.deepEqual(await processHints('win32', async () => JSON.stringify(`${command} --remote-debugging-address=example.com`)), { profiles: [], endpoints: [] });
+  assert.deepEqual(await processHints('win32', async () => { throw new Error('PowerShell unavailable'); }), { profiles: [], endpoints: [] });
+  assert.deepEqual(await processHints('win32', async () => 'invalid JSON'), { profiles: [], endpoints: [] });
+});
 
 test('no reachable candidate launches only the dedicated profile and records the actual free endpoint', async () => temporary(async cfg => {
   let spawned = 0;
@@ -83,7 +154,7 @@ test('no reachable candidate launches only the dedicated profile and records the
       return { on() {}, unref() {}, exitCode: null };
     }) as any,
   });
-  const result = await startChrome(cfg, undefined, undefined, { discover: async () => undefined, launch });
+  const result = await startChrome(cfg, undefined, undefined, { ready: endpointReady, discover: async () => undefined, launch });
   assert.equal(result.started, true);
   assert.equal(spawned, 1);
   assert.equal(result.endpoint, 'http://127.0.0.1:9444');

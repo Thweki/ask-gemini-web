@@ -1,11 +1,11 @@
 import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, rm, symlink, readFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { defaultHome, settings } from '../src/config.js';
-import { findChrome } from '../src/browser.js';
+import { findChrome, startChrome } from '../src/browser.js';
 
 async function isolated(action: (root: string, warnings: string[]) => Promise<void>) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'ask-gemini-web-compat-'));
@@ -71,6 +71,7 @@ test('default homes reuse legacy local/platform data without migration and prefe
     await mkdir(path.join(project, '.ask-gemini-web'));
     assert.equal(defaultHome(project, user, platform), path.join(project, '.ask-gemini-web'));
   }
+  process.env.LOCALAPPDATA = path.join(root, 'selected-local');
   const project = path.join(root, 'selected-old-home');
   const old = path.join(project, '.gemini-draft');
   await mkdir(old, { recursive: true });
@@ -93,11 +94,71 @@ test('Chrome environment alias warns and new variable or explicit option wins', 
   assert.equal(warnings.length, 0);
 }));
 
+test('bundled-style project configuration reuses legacy jobs and connection unless home is explicit', async () => isolated(async (root, warnings) => {
+  const old = path.join(root, '.gemini-draft');
+  await mkdir(path.join(old, 'runs', 'saved-job'), { recursive: true });
+  await writeFile(path.join(old, 'runs', 'saved-job', 'run.json'), '{"id":"saved-job"}');
+  await writeFile(path.join(old, 'connection.json'), '{"endpoint":"http://127.0.0.1:9444"}');
+  const bundled = JSON.parse(await readFile('ask-gemini-web.config.json', 'utf8'));
+  assert.equal(bundled.home, undefined);
+  for (const project of [bundled, { ...bundled, home: '.ask-gemini-web' }]) {
+    await writeFile(path.join(root, 'ask-gemini-web.config.json'), JSON.stringify(project));
+    const cfg = settings({}, root);
+    assert.equal(cfg.home, old);
+    assert.equal(cfg.endpoint, 'http://127.0.0.1:9444');
+    assert.equal(cfg.endpointSource, 'remembered');
+    assert.equal(cfg.profile, path.join(old, 'chrome-profile'));
+    assert.equal(await readFile(path.join(cfg.runs, 'saved-job', 'run.json'), 'utf8'), '{"id":"saved-job"}');
+    assert.equal(await readFile(path.join(cfg.home, 'connection.json'), 'utf8'), '{"endpoint":"http://127.0.0.1:9444"}');
+    assert.ok(warnings.pop()?.includes(old));
+  }
+  const current = path.join(root, '.ask-gemini-web');
+  assert.equal(settings({ home: current }, root).home, current);
+  for (const name of ['ASK_GEMINI_WEB_HOME', 'GEMINI_DRAFT_HOME']) {
+    process.env[name] = current;
+    assert.equal(settings({}, root).home, current);
+    delete process.env[name];
+  }
+  await mkdir(current);
+  assert.equal(settings({}, root).home, current);
+  await mkdir(path.join(root, 'gemini-draft'));
+  await writeFile(path.join(root, 'ask-gemini-web.config.json'), '{"home":"ask-gemini-web"}');
+  assert.equal(settings({}, root).home, path.join(root, 'gemini-draft'));
+}));
+
+test('CLI and both CDP environment names are explicit; unavailable settings leave connection unchanged', async () => isolated(async (root) => {
+  const file = path.join(root, 'connection.json');
+  const saved = '{"endpoint":"http://127.0.0.1:9444"}';
+  await writeFile(file, saved);
+  await writeFile(path.join(root, 'ask-gemini-web.config.json'), '{"cdp":"http://127.0.0.1:9333"}');
+  assert.equal(settings({ home: root }, root).endpointSource, 'remembered');
+  const forbidden = async (): Promise<never> => { assert.fail('Must not discover or launch'); };
+  const check = async (cfg: ReturnType<typeof settings>) => {
+    assert.equal(cfg.endpoint, 'http://127.0.0.1:9555');
+    await assert.rejects(startChrome(cfg, undefined, undefined, { ready: async () => false, discover: forbidden, launch: forbidden }), { code: 'CDP_UNAVAILABLE', exitCode: 2 });
+    assert.equal(await readFile(file, 'utf8'), saved);
+  };
+  const cli = settings({ home: root, cdp: 'http://127.0.0.1:9555' }, root);
+  assert.equal(cli.endpointSource, 'cli');
+  await check(cli);
+  for (const name of ['ASK_GEMINI_WEB_CDP', 'GEMINI_DRAFT_CDP']) {
+    process.env[name] = 'http://127.0.0.1:9555';
+    const cfg = settings({ home: root }, root);
+    assert.equal(cfg.endpointSource, 'environment');
+    await check(cfg);
+    delete process.env[name];
+  }
+  await rm(file);
+  assert.equal(settings({ home: root }, root).endpointSource, 'project');
+  await rm(path.join(root, 'ask-gemini-web.config.json'));
+  assert.equal(settings({ home: root }, root).endpointSource, 'default');
+}));
+
 test('canonical and legacy runners preserve machine stdout; deprecated package bin warns', async () => {
   const manifest = JSON.parse(await readFile('package.json', 'utf8'));
   assert.equal(manifest.version, '0.2.1');
   assert.equal(manifest.bin['ask-gemini-web'], 'dist/cli.js');
-  assert.equal(manifest.bin['gemini-draft'], 'dist/cli.js');
+  assert.equal(manifest.bin['gemini-draft'], 'dist/gemini-draft.js');
   for (const runner of ['ask-gemini-web', 'gemini-draft']) {
     const r = spawnSync(process.execPath, [`skills/ask-gemini-web/scripts/${runner}.mjs`, 'run', '--stdin', '--dry-run'], {
       input: '{"prompt":"离线测试"}', encoding: 'utf8', timeout: 10000,
@@ -107,15 +168,14 @@ test('canonical and legacy runners preserve machine stdout; deprecated package b
     if (runner === 'gemini-draft') assert.match(r.stderr, /deprecated.*ask-gemini-web.mjs/);
     else assert.equal(r.stderr, '');
   }
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'ask-gemini-web-bin-'));
-  try {
-    const bin = path.join(dir, 'gemini-draft');
-    await symlink(path.resolve('dist/cli.js'), bin);
-    const r = spawnSync(process.execPath, [bin, '--compact', 'run', '--stdin', '--dry-run'], {
+  // npm's Windows shim invokes the entry file directly, without an alias in argv[1].
+  const entry: string = manifest.bin['gemini-draft'];
+  for (const flag of ['--compact', '--json']) {
+    const r = spawnSync(process.execPath, [entry, flag, 'run', '--stdin', '--dry-run'], {
       input: '{"prompt":"Offline"}', encoding: 'utf8', timeout: 10000,
     });
     assert.equal(r.status, 0, r.stderr);
     assert.equal(JSON.parse(r.stdout).prompt, 'Offline');
     assert.match(r.stderr, /deprecated.*gemini-draft.*ask-gemini-web/);
-  } finally { await rm(dir, { recursive: true, force: true }); }
+  }
 });

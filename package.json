@@ -9,7 +9,7 @@
   "license": "MIT",
   "bin": {
     "ask-gemini-web": "dist/cli.js",
-    "gemini-draft": "dist/cli.js"
+    "gemini-draft": "dist/gemini-draft.js"
   },
   "engines": {
     "node": ">=22.12"

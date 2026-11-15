@@ -58,7 +58,7 @@ export function devToolsEndpoint(contents: string): string | undefined {
   return `http://127.0.0.1:${port}`;
 }
 
-export function chromeProcessHints(commandLines: string[][]) {
+export function chromeProcessHints(commandLines: string[][], platform = process.platform) {
   const profiles: string[] = [], endpoints: string[] = [];
   for (const args of commandLines) {
     if (!/chrome|chromium/i.test(path.basename(args[0] || ''))) continue;
@@ -69,7 +69,7 @@ export function chromeProcessHints(commandLines: string[][]) {
     const address = flag('--remote-debugging-address');
     if (address && !['127.0.0.1', 'localhost', '::1'].includes(address)) continue;
     const profile = flag('--user-data-dir');
-    if (profile && path.isAbsolute(profile)) profiles.push(profile);
+    if (profile && (platform === 'win32' ? path.win32 : path).isAbsolute(profile)) profiles.push(profile);
     const port = flag('--remote-debugging-port');
     const endpoint = port && devToolsEndpoint(port);
     if (endpoint) endpoints.push(address === '::1' ? endpoint.replace('127.0.0.1', '[::1]') : address === 'localhost' ? endpoint.replace('127.0.0.1', 'localhost') : endpoint);
@@ -77,9 +77,24 @@ export function chromeProcessHints(commandLines: string[][]) {
   return { profiles, endpoints };
 }
 
-async function processHints() {
+function chromeCommandLine(line: string) {
+  const match = line.trim().match(/^"?(.*?[\\/](?:Google Chrome|Chromium|chrome\.exe|chromium\.exe))"?(?=\s|$)(.*)$/i);
+  if (!match) return [];
+  // ps can print unquoted paths with spaces. Each relevant value ends at the
+  // next switch; quoted Windows command lines also retain their full paths.
+  const args = [match[1]];
+  for (const flag of ['--user-data-dir', '--remote-debugging-address', '--remote-debugging-port']) {
+    const boundary = flag === '--user-data-dir' ? '(?=\\s+"?--|$)' : '(?=\\s|$)';
+    const value = match[2].match(new RegExp(`(?:^|\\s)"?${flag}(?:=|\\s+)(?:"([^"]*)"|'([^']*)'|(.+?))${boundary}`));
+    if (value) args.push(`${flag}=${(value[1] ?? value[2] ?? value[3]).replace(/"$/, '').trim()}`);
+  }
+  return args;
+}
+
+export async function processHints(platform = process.platform,
+  command = async (file: string, args: string[]) => (await promisify(execFile)(file, args, { timeout: 2000, maxBuffer: 4 * 1024 * 1024 })).stdout) {
   let lines: string[][] = [];
-  if (process.platform === 'linux') {
+  if (platform === 'linux') {
     const pids = await readdir('/proc').catch(() => [] as string[]);
     lines = await Promise.all(pids.filter(pid => /^\d+$/.test(pid)).map(async pid => {
       const name = await readFile(`/proc/${pid}/comm`, 'utf8').catch(() => '');
@@ -87,16 +102,19 @@ async function processHints() {
       const command = await readFile(`/proc/${pid}/cmdline`, 'utf8').catch(() => '');
       return command.split('\0').filter(Boolean);
     }));
-  } else if (process.platform === 'darwin') {
-    const output = await promisify(execFile)('ps', ['-ax', '-o', 'command='], { timeout: 2000, maxBuffer: 4 * 1024 * 1024 }).catch(() => ({ stdout: '' }));
-    lines = output.stdout.split('\n').flatMap(line => {
-      const match = line.trim().match(/^(.*?\/(?:Google Chrome|Chromium))(?=\s|$)(.*)$/);
-      if (!match) return [];
-      const args = (match[2].match(/"[^"\n]*"|'[^'\n]*'|\S+/g) || []).map(arg => arg.replace(/^["']|["']$/g, ''));
-      return [[match[1], ...args]];
-    });
+  } else if (platform === 'darwin') {
+    const output = await command('ps', ['-ax', '-o', 'command=']).catch(() => '');
+    lines = output.split('\n').map(chromeCommandLine);
+  } else if (platform === 'win32') {
+    const output = await command('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
+      "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; @(Get-CimInstance Win32_Process -Filter \"Name = 'chrome.exe' OR Name = 'chromium.exe'\" | Select-Object -ExpandProperty CommandLine) | ConvertTo-Json -Compress",
+    ]).catch(() => '');
+    try {
+      const commands: unknown = JSON.parse(output.replace(/^\uFEFF/, ''));
+      lines = (Array.isArray(commands) ? commands : [commands]).filter((line): line is string => typeof line === 'string').map(chromeCommandLine);
+    } catch { /* Process inspection is optional; discovery can use profile files. */ }
   }
-  return chromeProcessHints(lines);
+  return chromeProcessHints(lines, platform);
 }
 
 export function profileLocations(config: Settings, platform = process.platform, home = os.homedir()) {
@@ -125,7 +143,10 @@ export async function discoverEndpoint(config: Settings, options: DiscoveryOptio
     tried.add(key);
     return await (options.ready || endpointReady)(endpoint) ? endpoint : undefined;
   };
-  for (const input of [config.endpoint, ...(options.commonPorts || [9222, 9333]).map(port => `http://127.0.0.1:${port}`)]) {
+  const configured = await probe(config.endpoint);
+  if (configured) return configured;
+  if (explicitEndpoint(config)) throw unavailableEndpoint(config);
+  for (const input of (options.commonPorts || [9222, 9333]).map(port => `http://127.0.0.1:${port}`)) {
     const endpoint = await probe(input);
     if (endpoint) return endpoint;
   }
@@ -141,6 +162,14 @@ export async function discoverEndpoint(config: Settings, options: DiscoveryOptio
     const endpoint = await probe(input);
     if (endpoint) return endpoint;
   }
+}
+
+function explicitEndpoint(config: Settings) {
+  return config.endpointSource === 'cli' || config.endpointSource === 'environment';
+}
+
+function unavailableEndpoint(config: Settings) {
+  return new DraftError('CDP_UNAVAILABLE', `无法连接显式 CDP 地址 ${config.endpoint}。请启动该地址上的 Chrome，或去掉 --cdp / 清除 CDP 环境变量以使用自动发现。`, 2);
 }
 
 function availablePort(port: number) {
@@ -187,8 +216,12 @@ export async function launchChrome(config: Settings, executable?: string, initia
 }
 
 export async function startChrome(config: Settings, executable?: string, initialUrl = GEMINI,
-  dependencies = { discover: discoverEndpoint, launch: launchChrome }) {
-  const endpoint = await dependencies.discover(config);
+  dependencies = { discover: discoverEndpoint, launch: launchChrome, ready: endpointReady }) {
+  let endpoint: string | undefined;
+  if (explicitEndpoint(config)) {
+    if (!await dependencies.ready(config.endpoint)) throw unavailableEndpoint(config);
+    endpoint = config.endpoint;
+  } else endpoint = await dependencies.discover(config);
   const result = endpoint ? { started: false, endpoint } : await dependencies.launch(config, executable, initialUrl);
   await mkdir(config.home, { recursive: true, mode: 0o700 });
   const file = path.join(config.home, 'connection.json');
