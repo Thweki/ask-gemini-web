@@ -38,10 +38,10 @@ npm run build
 npm run install:skill
 ```
 
-For an existing installation, use `npm run install:skill -- --update` in the last step. Load [SKILL.md](skills/ask-gemini-web/SKILL.md), resolve the bundled runner, and make one call with JSON on stdin:
+For an existing installation, use `npm run install:skill -- --update` in the last step. Load [SKILL.md](skills/ask-gemini-web/SKILL.md), resolve the bundled runner, and make one call with a UTF-8 JSON job file (preferred on Windows):
 
 ```text
-node <skill>/scripts/gemini-draft.mjs run --stdin
+node <skill>/scripts/gemini-draft.mjs run job.json
 ```
 
 ```json
@@ -49,13 +49,15 @@ node <skill>/scripts/gemini-draft.mjs run --stdin
 ```
 
 ```text
-draft({ prompt, model?, thinking?, task? }) → { id, state, result, selection }
+draft({ prompt, model?, thinking?, task? }) → { id, state, promptSha256, result, selection }
 ```
 
 Omitted options use local task routing against live web capabilities. Explicit parameters take priority and fail if unavailable (e.g., `"model":"Gemini 4 Hydrogen","thinking":"medium"` pins both). Browser startup, selection, submission, and saving run inside this single call without an extra model-driven browser loop.
+
+`run --stdin` remains available for UTF-8 pipes. PowerShell 5.1 can silently replace Chinese with `?` before Node receives it; use a file on Windows. The returned `promptSha256` identifies the rendered prompt. `--compact`/`--json` keep stderr free of progress; `--quiet` suppresses progress in human mode.
 
 Load references only as needed: [setup/API/recovery](skills/ask-gemini-web/references/api.md), [routing policy](skills/ask-gemini-web/references/routing.md), or [dated benchmark evidence](skills/ask-gemini-web/references/benchmarks.md). Do not prepend diagnostic calls to ordinary drafting. Preview with `plan`; recover uncertain submissions with `resume <id>`, never a new run. Follow the host's normal permission flow for local Chrome/CDP access.
 
 Requires Node.js 22.12+, Chrome, and Gemini access. The installer provides independent runtimes for Codex and Agent Skills directories. Profiles and saved task records stay local and are excluded from release packages—never export passwords or cookies.
 
-Supports standard single-turn text and basic Markdown. Canvas, Deep Research workflows, binary uploads, and exact regeneration are outside this version. Verified on Windows, Chrome 157, and Chinese Gemini UI; other environments may need adapter updates. See [acceptance](ACCEPTANCE.md). Licensed under [MIT](LICENSE).
+Supports standard single-turn text and basic Markdown. Canvas, Deep Research workflows, binary uploads, and exact regeneration are outside this version. Verified on Windows, Chrome 157, and Chinese Gemini UI; other environments may need adapter updates. Licensed under [MIT](LICENSE).

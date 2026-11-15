@@ -8,11 +8,11 @@ import { Connection, findChrome, pause, shutdown, startChrome } from './browser.
 import { Gemini } from './gemini.js';
 import { previewSelection } from './selection.js';
 import { DraftError, errorInfo } from './errors.js';
-import { compileJob, execute, loadJob, parseJobJson, resume, runSummary, RunStore } from './jobs.js';
+import { compileJob, decodeUtf8, execute, loadJob, parseJobJson, resume, runSummary, RunStore } from './jobs.js';
 
 const program = new Command();
 program.exitOverride().configureOutput({
-  outputError: (message, write) => { if (!program.opts().json) write(message); },
+  outputError: (message, write) => { if (!machineOutput()) write(message); },
 });
 process.once('SIGINT', () => shutdown.abort(new DraftError('INTERRUPTED', '操作已中断，Chrome 与任务记录已保留。', 130)));
 process.once('SIGTERM', () => shutdown.abort(new DraftError('INTERRUPTED', '操作已中断，Chrome 与任务记录已保留。', 143)));
@@ -21,10 +21,12 @@ program.name('gemini-draft').version('0.2.1')
   .option('--cdp <url>', '本机 Chrome CDP 地址（默认使用保存的配置）')
   .option('--home <path>', '专用配置与任务数据目录')
   .option('--compact', '单行 JSON，适合 agent 调用')
+  .option('--quiet', '隐藏进度信息（仍报告错误）')
   .option('--json', '错误也以 JSON 输出（成功结果始终为 JSON）');
 
+function machineOutput() { return !!(program.opts().json || program.opts().compact); }
 const config = () => settings(program.opts());
-const info = (message: string) => console.error(message);
+const info = (message: string) => { if (!machineOutput() && !program.opts().quiet) console.error(message); };
 function report(data: unknown) { console.log(JSON.stringify(data, null, program.opts().compact ? undefined : 2)); }
 async function connected<T>(action: (connection: Connection) => Promise<T>) {
   const connection = await Connection.open(config());
@@ -140,9 +142,7 @@ async function inputJob(filename: string | undefined, options: { stdin?: boolean
       if (bytes > 2 * 1024 * 1024) throw new DraftError('INPUT_TOO_LARGE', 'stdin JSON 超过 2 MiB。');
       chunks.push(chunk);
     }
-    let raw: string;
-    try { raw = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(Buffer.concat(chunks, bytes)); }
-    catch { throw new DraftError('INVALID_UTF8', 'stdin JSON 必须使用 UTF-8 编码。'); }
+    const raw = decodeUtf8(Buffer.concat(chunks, bytes));
     job = await compileJob(parseJobJson(raw));
   } else job = await loadJob(filename!);
   if (options.model) job.model = options.model;
@@ -172,7 +172,7 @@ program.command('run [job]').description('一次调用完成自动选择、写�
   .option('--task <type>', '覆盖任务类型')
   .action(async (filename, options) => {
     const job = await inputJob(filename, options);
-    if (options.dryRun) { report({ dryRun: true, ...job }); return; }
+    if (options.dryRun) { report({ dryRun: true, ...job, promptSha256: job.sha256 }); return; }
     report(runSummary(await execute(config(), job, info)));
   });
 
@@ -187,7 +187,7 @@ program.command('export <id>').description('导出已完成任务的稿件，不
   .action(async (id, options) => {
     const store = new RunStore(config());
     const run = await store.read(id);
-    if (run.state !== 'complete') throw new DraftError('RUN_INCOMPLETE', '任务尚未完成，请先 resume。');
+    if (run.state !== 'complete' && run.state !== 'collected') throw new DraftError('RUN_INCOMPLETE', '任务尚未采集完成，请先 resume。');
     const output = path.resolve(options.output);
     await mkdir(path.dirname(output), { recursive: true });
     await copyFile(path.join(store.directory(id), 'draft.md'), output, constants.COPYFILE_EXCL);
@@ -197,12 +197,12 @@ program.command('export <id>').description('导出已完成任务的稿件，不
 try { await program.parseAsync(); }
 catch (error) {
   if (error instanceof CommanderError) {
-    if (error.exitCode !== 0 && program.opts().json) report({ ok: false, error: { code: 'INVALID_ARGUMENT', message: error.message } });
+    if (error.exitCode !== 0 && machineOutput()) report({ ok: false, error: { code: 'INVALID_ARGUMENT', message: error.message } });
     process.exitCode = error.exitCode;
   } else {
     const detail = errorInfo(error);
-    if (program.opts().json) report({ ok: false, error: detail });
-    else info(`${detail.code}：${detail.message}`);
+    if (machineOutput()) report({ ok: false, error: detail });
+    else console.error(`${detail.code}：${detail.message}`);
     process.exitCode = error instanceof DraftError ? error.exitCode : 1;
   }
 }

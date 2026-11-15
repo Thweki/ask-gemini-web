@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { readFile, writeFile, mkdir, rename, open, unlink, access } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, rename, open, unlink, access, link, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { parse } from 'yaml';
 import { jobSchema, type Settings } from './config.js';
@@ -12,6 +12,11 @@ import type { Page } from 'playwright-core';
 import { toMarkdown } from './markdown.js';
 
 const hash = (input: string) => createHash('sha256').update(input).digest('hex');
+export function decodeUtf8(bytes: Uint8Array): string {
+  try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); }
+  catch { throw new DraftError('INVALID_UTF8', '任务和文本素材必须使用 UTF-8 编码。'); }
+}
+const readUtf8 = async (file: string) => decodeUtf8(await readFile(file));
 export function parseJobJson(raw: string): unknown {
   try { return JSON.parse(raw.replace(/^\uFEFF/, '')); }
   catch { throw new DraftError('INVALID_JSON', '任务输入不是有效的 JSON。'); }
@@ -19,7 +24,7 @@ export function parseJobJson(raw: string): unknown {
 export async function loadJob(filename: string) {
   const absolute = path.resolve(filename);
   const base = path.dirname(absolute);
-  const raw = await readFile(absolute, 'utf8');
+  const raw = await readUtf8(absolute);
   if (/\.json$/i.test(filename)) return compileJob(parseJobJson(raw), base, absolute);
   let input: unknown;
   try { input = parse(raw); }
@@ -31,7 +36,7 @@ export async function compileJob(input: unknown, base = process.cwd(), source = 
   const parsed = jobSchema.safeParse(input);
   if (!parsed.success) throw new DraftError('INVALID_JOB', parsed.error.issues.map(issue => `${issue.path.join('.')}: ${issue.message}`).join('\n'));
   const job = parsed.data;
-  let prompt = job.prompt ?? await readFile(path.resolve(base, job.promptFile!), 'utf8');
+  let prompt = job.prompt ?? await readUtf8(path.resolve(base, job.promptFile!));
   // Single replacement pass: user values are data, never executable code or recursive templates.
   prompt = prompt.replace(/(\\?)\{\{\s*([\p{L}\p{M}\p{N}_.-]+)\s*\}\}/gu, (match, escape: string, key: string) => {
     if (escape) return match.slice(1);
@@ -44,7 +49,7 @@ export async function compileJob(input: unknown, base = process.cwd(), source = 
   for (const relative of job.materials) {
     const materialPath = path.resolve(base, relative);
     if (!/\.(md|txt|csv|json|ya?ml)$/i.test(materialPath)) throw new DraftError('UNSUPPORTED_MATERIAL', '第一版仅支持 UTF-8 文本素材：md/txt/csv/json/yaml。');
-    const text = await readFile(materialPath, 'utf8');
+    const text = await readUtf8(materialPath);
     materials.push({ path: materialPath, sha256: hash(text) });
     prompt += `\n\n--- 素材：${path.basename(materialPath)} ---\n${text}\n--- 素材结束 ---`;
   }
@@ -54,7 +59,7 @@ export async function compileJob(input: unknown, base = process.cwd(), source = 
 export type Job = Awaited<ReturnType<typeof loadJob>>;
 export type Run = {
   version: 1; id: string; createdAt: string; updatedAt: string;
-  state: 'prepared' | 'submit_intent' | 'submitted' | 'collecting' | 'complete';
+  state: 'prepared' | 'submit_intent' | 'submitted' | 'collecting' | 'collected' | 'complete';
   source: string; promptHash: string; materials: Job['materials']; requestedModel?: string;
   taskText?: string; task?: Task | 'auto'; requestedThinking?: string;
   chosenThinking?: ThinkingOption; selection?: Selection;
@@ -160,6 +165,44 @@ async function checkOutput(output?: string) {
   await mkdir(path.dirname(output), { recursive: true });
 }
 
+async function finish(store: RunStore, run: Run) {
+  let temporary: string | undefined;
+  if (run.output) {
+    const content = await readFile(path.join(store.directory(run.id), 'draft.md'));
+    await mkdir(path.dirname(run.output), { recursive: true });
+    temporary = `${run.output}.${run.id}.tmp`;
+    let staging;
+    try { staging = await open(temporary, 'wx', 0o600); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      if (!(await readFile(temporary)).equals(content)) throw new DraftError('OUTPUT_STAGING_CHANGED', '待导出临时文件内容不匹配，停止导出。');
+    }
+    if (staging) {
+      try { await staging.writeFile(content); }
+      catch (error) {
+        await staging.close();
+        await unlink(temporary).catch(() => {});
+        throw error;
+      }
+      await staging.close();
+    }
+    // Publish a fully written file without rename's overwrite behavior. The retained
+    // staging link also proves ownership if the process stops before saving complete.
+    try { await link(temporary, run.output); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      const [staged, output] = await Promise.all([stat(temporary), stat(run.output)]);
+      if (!staged.ino || staged.ino !== output.ino || staged.dev !== output.dev) {
+        throw new DraftError('OUTPUT_EXISTS', `输出文件已存在，不覆盖：${run.output}`);
+      }
+    }
+  }
+  run.state = 'complete'; run.lastError = undefined;
+  await store.save(run);
+  if (temporary) await unlink(temporary).catch(() => {});
+  return run;
+}
+
 async function submit(connection: Connection, store: RunStore, run: Run, prompt: string, notify: (message: string) => void) {
   await checkOutput(run.output);
   const previous = await findTaskPage(connection, run.targetId, GEMINI);
@@ -218,11 +261,10 @@ async function collect(gemini: Gemini, store: RunStore, run: Run, prompt: string
       await writeFile(path.join(directory, 'response.txt'), progress.text, { mode: 0o600 });
       await writeFile(path.join(directory, 'response.html'), progress.html, { mode: 0o600 });
       await writeFile(path.join(directory, 'draft.md'), markdown + '\n', { mode: 0o600 });
-      // Save a durable result before exporting: an export failure never needs another generation.
-      run.state = 'complete'; run.result = path.join(directory, 'draft.md'); run.lastError = undefined;
+      // Persist collection separately so failed exports resume locally without generating again.
+      run.state = 'collected'; run.result = path.join(directory, 'draft.md'); run.lastError = undefined;
       await store.save(run);
-      if (run.output) await writeFile(run.output, markdown + '\n', { flag: 'wx', mode: 0o600 });
-      return run;
+      return await finish(store, run);
     }
     if (run.state !== 'collecting') { run.state = 'collecting'; await store.save(run); }
     await pause(750);
@@ -247,9 +289,12 @@ export async function resume(config: Settings, id: string, notify: (message: str
 }
 
 async function work(config: Settings, store: RunStore, run: Run, notify: (message: string) => void, connect = Connection.ensure): Promise<Run> {
+  // Older releases marked complete before attempting the requested export.
+  if (run.state === 'complete' && run.output && run.lastError) run.state = 'collected';
   if (run.state === 'complete') return run;
   let connection: Connection | undefined;
   try {
+    if (run.state === 'collected') return await finish(store, run);
     const prompt = await store.prompt(run);
     connection = await connect(config);
     let gemini: Gemini;
@@ -294,5 +339,5 @@ async function work(config: Settings, store: RunStore, run: Run, notify: (messag
 }
 
 export function runSummary(run: Run) {
-  return { id: run.id, state: run.state, result: run.result, selection: selectionSummary(run.selection) };
+  return { id: run.id, state: run.state, promptSha256: run.promptHash, result: run.result, selection: selectionSummary(run.selection) };
 }

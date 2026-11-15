@@ -21,7 +21,7 @@ export const selectors = {
 
 export type AuthStatus = 'logged_in' | 'logged_out' | 'challenge' | 'consent_required' | 'restricted' | 'unknown';
 export type Auth = { status: AuthStatus; reason: string; url: string };
-export type Model = { id: string; name: string; description: string; availability: 'available' | 'unavailable'; selected: boolean; reason?: string };
+export type Model = { id: string; name: string; mode?: string; description: string; availability: 'available' | 'unavailable'; selected: boolean; reason?: string };
 export type ThinkingOption = Model;
 const normalize = (text: string) => text.replace(/\s+/g, ' ').trim().toLocaleLowerCase();
 export const modelId = (name: string) => normalize(name).replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '');
@@ -117,9 +117,14 @@ export class Gemini {
     return this.menuById(id);
   }
 
-  private async menuById(id: string | null): Promise<Locator> {
-    const menu = id && /^[\w-]+$/.test(id) ? this.page.locator(`#${id}`) : this.page.locator(selectors.overlay).first();
-    await menu.waitFor({ state: 'visible' });
+  private async menuById(id: string | null, code = 'MODEL_MENU_UNKNOWN'): Promise<Locator> {
+    if (!id || !/^[\w-]+$/.test(id)) throw new DraftError(code, '菜单缺少有效的 aria-controls，停止选择。');
+    const menu = this.page.locator(`#${id}`);
+    try { await menu.waitFor({ state: 'visible' }); }
+    catch { throw new DraftError(code, 'aria-controls 指向的菜单无法唯一确认，停止选择。'); }
+    if (!['menu', 'listbox'].includes(await menu.getAttribute('role') || '')) {
+      throw new DraftError(code, 'aria-controls 未指向可识别的菜单，停止选择。');
+    }
     return menu;
   }
 
@@ -135,7 +140,7 @@ export class Gemini {
     await this.page.keyboard.press('Escape');
   }
 
-  private async options(root: Locator) {
+  private async options(root: Locator, kind: 'model' | 'thinking' = 'model') {
     // Only inspect a newly opened model menu, never arbitrary buttons in the chat.
     const candidates = root.locator(selectors.options);
     await candidates.first().waitFor({ state: 'visible' });
@@ -155,27 +160,38 @@ export class Gemini {
       }));
       if (data.submenu) continue;
       const lines = data.text.split('\n').map(line => line.trim()).filter(line => line && !/^(check|check_circle|lock|expand_more|keyboard_arrow_down|arrow_forward|done)$/i.test(line));
-      const name = lines[0] || data.label?.trim();
-      if (!name || /^(close|cancel|关闭|取消)$/i.test(name)) continue;
+      const label = lines[0] || data.label?.trim();
+      if (!label || /^(close|cancel|关闭|取消)$/i.test(label)) continue;
+      // Gemini can put a localized use-case label before the actual model name.
+      const modelLines = kind === 'model' ? lines.filter(line => /^(?:gemini\s+\S|(?:gemini\s+)?\d+(?:\.\d+)*[\s-]+[\p{L}]|(?:hydrogen|argon|carbon|flash(?:[ -]lite)?|pro)\b)/iu.test(line)) : [];
+      if (modelLines.length > 1) throw new DraftError('AMBIGUOUS_MODELS', '同一选项出现多个型号，停止选择。');
+      const name = modelLines[0] || label;
+      const description = lines.filter((line, index) => line !== name && !(modelLines.length && index === 0)).join(' ');
+      const id = kind === 'thinking' ? effortId(name, description) : modelId(name);
+      if (!id) throw new DraftError('THINKING_UNKNOWN', `无法归一化思考等级“${name}”，停止选择。`);
       const unavailable = data.disabled || data.upgrade || data.locked || /(^|\n)\s*lock\s*(\n|$)|upgrade|unlock|升级|解锁|达到.*上限|limit reached/i.test(data.text);
       collected.push({ locator, model: {
-        id: modelId(name), name, description: lines.slice(1).join(' '), selected: data.selected,
+        id, name, description, ...(kind === 'model' && name !== label ? { mode: label } : {}), selected: data.selected,
         availability: unavailable ? 'unavailable' : 'available',
         ...(unavailable ? { reason: data.disabled ? '页面控件已禁用' : '页面显示升级或额度限制' } : {}),
       } });
     }
     if (!collected.length) throw new DraftError('MODEL_MENU_UNKNOWN', '模型菜单已打开，但无法识别选项；请更新页面适配。');
     const ids = collected.map(item => item.model.id);
-    if (new Set(ids).size !== ids.length) throw new DraftError('AMBIGUOUS_MODELS', '模型菜单包含重名选项，无法安全选择。');
+    if (new Set(ids).size !== ids.length) throw new DraftError(kind === 'thinking' ? 'AMBIGUOUS_THINKING' : 'AMBIGUOUS_MODELS', '菜单包含重名选项，无法安全选择。');
     return collected;
   }
 
   async models(): Promise<{ current: string; models: Model[] }> {
     await this.requireLogin();
     const { trigger, menu } = await this.openModels();
-    const current = (await trigger.innerText()).trim();
     try {
-      return { current, models: (await this.options(menu)).map(item => item.model) };
+      const models = (await this.options(menu)).map(item => item.model);
+      const selected = models.filter(model => model.selected);
+      const triggerLines = (await trigger.innerText()).split('\n').map(normalize);
+      const current = selected.length ? selected : models.filter(model => [model.name, model.mode].some(value => value && triggerLines.includes(normalize(value))));
+      if (current.length !== 1) throw new DraftError('MODEL_CURRENT_UNKNOWN', '无法唯一确认当前模型。');
+      return { current: current[0].name, models };
     } finally { await this.closeMenus(); }
   }
 
@@ -184,7 +200,7 @@ export class Gemini {
     const { trigger, menu } = await this.openModels();
     try {
       const options = await this.options(menu);
-      const matched = options.filter(({ model }) => model.id === modelId(requested) || normalize(model.name) === normalize(requested));
+      const matched = options.filter(({ model }) => model.id === modelId(requested) || [model.name, model.mode].some(value => value && normalize(value) === normalize(requested)));
       if (matched.length !== 1) throw new DraftError('MODEL_NOT_FOUND', `未找到唯一模型“${requested}”。请先运行 models list 获取实际名称或 ID。`);
       const { model, locator } = matched[0];
       if (model.availability !== 'available') throw new DraftError('MODEL_UNAVAILABLE', `模型“${model.name}”不可用：${model.reason}`);
@@ -192,9 +208,9 @@ export class Gemini {
       await menu.waitFor({ state: 'hidden' });
       // Reopen and verify selected state rather than assuming the click succeeded.
       const reopened = await this.openModels();
-      const verified = (await this.options(reopened.menu)).find(item => item.model.id === model.id)?.model;
-      const triggerText = normalize(await trigger.innerText());
-      if (!verified?.selected && !triggerText.includes(normalize(model.name))) {
+      const selected = (await this.options(reopened.menu)).filter(item => item.model.selected);
+      const triggerLines = (await trigger.innerText()).split('\n').map(normalize);
+      if (selected.length ? selected.length !== 1 || selected[0].model.id !== model.id : !triggerLines.includes(normalize(model.name))) {
         throw new DraftError('MODEL_SELECTION_UNVERIFIED', `无法确认模型已切换为“${model.name}”，任务未发送。`);
       }
       return { ...model, selected: true };
@@ -207,16 +223,17 @@ export class Gemini {
     if (await triggers.count() !== 1) throw new DraftError('THINKING_MENU_UNKNOWN', '无法唯一识别思考等级子菜单。');
     const trigger = triggers.first();
     const id = await trigger.getAttribute('aria-controls');
+    if (!id || id === await menu.getAttribute('id')) throw new DraftError('THINKING_MENU_UNKNOWN', '无法确认独立的思考等级子菜单，停止选择。');
     // Real Gemini expands this submenu on hover; click alone does not reliably open it.
     await trigger.hover();
-    return await this.menuById(id);
+    return await this.menuById(id, 'THINKING_MENU_UNKNOWN');
   }
 
   async thinking(): Promise<{ current: string | null; levels: ThinkingOption[] }> {
     await this.requireLogin();
     try {
       const menu = await this.openThinking();
-      const levels = (await this.options(menu)).map(({ model }) => ({ ...model, id: effortId(model.name) || model.id }));
+      const levels = (await this.options(menu, 'thinking')).map(({ model }) => model);
       const selected = levels.filter(level => level.selected);
       return { current: selected.length === 1 ? selected[0].id : null, levels };
     } finally { await this.closeMenus(); }
@@ -227,8 +244,8 @@ export class Gemini {
     const wanted = effortId(requested) || requested;
     try {
       const menu = await this.openThinking();
-      const items = await this.options(menu);
-      const matched = items.filter(({ model }) => (effortId(model.name) || model.id) === wanted || normalize(model.name) === normalize(requested));
+      const items = await this.options(menu, 'thinking');
+      const matched = items.filter(({ model }) => model.id === wanted);
       if (matched.length !== 1 || matched[0].model.availability !== 'available') throw new DraftError('THINKING_UNAVAILABLE', `页面未提供可用思考等级“${requested}”。`);
       await matched[0].locator.click();
       await this.closeMenus();

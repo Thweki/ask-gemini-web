@@ -31,9 +31,11 @@ export async function previewSelection(gemini: Gemini, input: SelectionInput) {
 }
 
 export function selectionSummary(selection?: Selection) {
+  // Read records saved before model names and localized mode labels were separated.
+  const legacyModel = selection && !selection.model.mode && /^(?:gemini\s+\S|\d+(?:\.\d+)*[\s-]+\p{L})/iu.test(selection.model.description);
   return selection ? {
-    task: selection.task, model: selection.model.description || selection.model.name,
-    mode: selection.model.name, thinking: selection.thinking.id,
+    task: selection.task, model: legacyModel ? selection.model.description : selection.model.name,
+    mode: selection.model.mode || selection.model.name, thinking: selection.thinking.id,
     source: selection.source, policy: selection.policy,
     ...(selection.warnings.length ? { warnings: selection.warnings } : {}),
   } : undefined;

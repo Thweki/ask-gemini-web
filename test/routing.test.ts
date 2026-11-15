@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chooseModel, chooseThinking, classify, resolveModel } from '../src/routing.js';
+import { chooseModel, chooseThinking, classify, effortId, resolveModel } from '../src/routing.js';
 import { compileJob } from '../src/jobs.js';
 import type { Model, ThinkingOption } from '../src/gemini.js';
 
@@ -39,6 +39,14 @@ test('thinking uses observed levels, preserves explicit constraints, and accepts
   const limited = levels.filter(level => level.id !== 'high');
   assert.equal(chooseThinking(limited, 'hard').option.id, 'medium');
   assert.equal(chooseThinking(limited, 'hard').warnings.length, 1);
+});
+test('thinking recognizes English labels and descriptions but refuses unknown IDs', () => {
+  assert.equal(effortId('Standard'), 'medium');
+  assert.equal(effortId('Extended'), 'high');
+  assert.equal(effortId('深度模式', 'Extended thinking'), 'high');
+  assert.equal(effortId('Mystery', 'Medium or high'), undefined);
+  const unknown = [{ ...levels[0], id: 'Mystery', selected: true }];
+  assert.throws(() => chooseThinking(unknown, 'quick'), { code: 'THINKING_UNKNOWN' });
 });
 test('stdin job compilation supports optional auto settings and never classifies appended sources', async () => {
   const job = await compileJob({ prompt: '请改写这段文字', thinking: 'auto' });

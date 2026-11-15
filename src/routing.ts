@@ -42,7 +42,7 @@ export const taskEffort: Record<Task, Effort> = { quick: 'low', writing: 'medium
 
 export function resolveModel(models: Model[], requested: string) {
   const request = normalized(requested);
-  const matched = models.filter(model => [model.id, model.name, model.description, family(model)]
+  const matched = models.filter(model => [model.id, model.name, model.mode, model.description, family(model)]
     .some(value => value && normalized(value).replace(/[\s_-]/g, '') === request.replace(/[\s_-]/g, '') && value !== 'unknown'));
   if (matched.length !== 1) throw new DraftError('MODEL_NOT_FOUND', `未找到唯一模型“${requested}”，请使用 models list 返回的名称、ID 或完整型号。`);
   if (matched[0].availability !== 'available') throw new DraftError('MODEL_UNAVAILABLE', `模型“${matched[0].name}”不可用：${matched[0].reason}`);
@@ -67,16 +67,23 @@ export function chooseModel(models: Model[], text: string, requested?: string, h
   return { model: fallback, task, source: 'auto' as const, policy: POLICY_VERSION, warnings: ['未收录该型号的 benchmark；保留唯一可确认的当前可用模型。'] };
 }
 
-export function effortId(input: string): Effort | undefined {
+export function effortId(input: string, description = ''): Effort | undefined {
   const value = input.trim().toLowerCase();
   if (/^(minimal|最低|最小)$/.test(value)) return 'minimal';
   if (/^(low|低)$/.test(value)) return 'low';
-  if (/^(medium|mid|中|中等)$/.test(value)) return 'medium';
-  if (/^(high|高)$/.test(value)) return 'high';
+  if (/^(medium|mid|standard|中|中等|标准|標準)$/.test(value)) return 'medium';
+  if (/^(high|extended|高|扩展|擴展)$/.test(value)) return 'high';
   if (/^(xhigh|extra.high|超高|极高)$/.test(value)) return 'xhigh';
+  // Descriptive UI labels may carry the actual level in their second line.
+  const labels = description.toLowerCase().match(/\b(?:minimal|low|medium|mid|standard|high|extended|xhigh|extra[ -]high)\b|最低|最小|中等|超高|极高|标准|標準|扩展|擴展|低|中|高/gu) || [];
+  const levels = new Set(labels.map(label => effortId(label)).filter((level): level is Effort => !!level));
+  if (levels.size === 1) return [...levels][0];
 }
 
 export function chooseThinking(options: ThinkingOption[], task: Task, requested?: string) {
+  if (options.some(option => !effortId(option.id) || effortId(option.id) !== option.id)) {
+    throw new DraftError('THINKING_UNKNOWN', '页面思考等级无法归一化，停止选择；请更新页面适配。');
+  }
   const explicit = !!requested && requested !== 'auto';
   const wanted = explicit ? effortId(requested) || requested : taskEffort[task];
   const available = options.filter(option => option.availability === 'available');
@@ -86,7 +93,7 @@ export function chooseThinking(options: ThinkingOption[], task: Task, requested?
   const rank: string[] = ['minimal', 'low', 'medium', 'high', 'xhigh'];
   const ranked = available.filter(option => rank.includes(option.id));
   ranked.sort((a, b) => Math.abs(rank.indexOf(a.id) - rank.indexOf(wanted)) - Math.abs(rank.indexOf(b.id) - rank.indexOf(wanted)) || rank.indexOf(a.id) - rank.indexOf(b.id));
-  const fallback = ranked[0] || (available.length === 1 ? available[0] : available.find(option => option.selected));
+  const fallback = ranked[0];
   if (!fallback) throw new DraftError('THINKING_UNKNOWN', '无法确认可用思考等级，请运行 thinking list。');
   return { option: fallback, source: 'auto' as const, requested: wanted, warnings: [`目标等级 ${wanted} 未提供，使用页面实际可用的 ${fallback.id}。`] };
 }

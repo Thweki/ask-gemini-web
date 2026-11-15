@@ -17,7 +17,7 @@
     "install:skill": "node scripts/install-skill.mjs",
     "prepack": "npm run build && node scripts/prepare-package.mjs"
   },
-  "files": ["dist", "skills", "scripts/install-skill.mjs", "README.md", "README.zh-CN.md", "LICENSE", "ACCEPTANCE.md", "examples", "npm-shrinkwrap.json"],
+  "files": ["dist", "skills", "scripts/install-skill.mjs", "README.md", "README.zh-CN.md", "LICENSE", "examples", "npm-shrinkwrap.json"],
   "dependencies": {
     "@mixmark-io/domino": "2.2.0",
     "commander": "15.1.0",
