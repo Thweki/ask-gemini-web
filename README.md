@@ -6,17 +6,39 @@ Let your agent ask questions or draft text through your Gemini web account. The 
 
 Built for web Q&A and drafting that preserve your agent-plan quota by moving the main generation to Gemini web. Also for users whose region does not support the Antigravity app but who can access Gemini web. Gemini web's own eligibility and usage limits still apply; agent coordination may use some agent quota.
 
-## For humans
+```mermaid
+flowchart TD
+    A["Agent sends a question or writing prompt"] --> B{"Model and thinking level"}
+    B -->|"Automatic"| C["Match the task to available options"]
+    B -->|"Specified"| D["Check the requested options"]
+    C --> E["Submit the prompt through Gemini web"]
+    D -->|"Available"| E
+    D -->|"Unavailable"| F["Return an error to the agent"]
+    E --> G["Save the response as Markdown"]
+    G --> H["Return the result and actual selection to the agent"]
+```
 
-Pass this repository link or local folder to your agent and say:
+## Install with your agent
 
-> Set up ask-gemini-web and use my Gemini web account to write an article about urban gardens; choose the model and thinking level for the task, and ask me to sign in only when needed.
+Copy this request into your agent chat.
+
+> Install ask-gemini-web from https://github.com/thweki/ask-gemini-web and use my Gemini web account to write an article about urban gardens. Choose the model and thinking level for the task and ask me to sign in when needed.
 
 Your agent handles setup and execution. You sign in directly at Google inside a dedicated Chrome window. Login persists in a local profile across restarts, though Google may occasionally require verification. No API key is needed; standard Gemini web usage limits apply.
 
 ## For agents
 
-Load [SKILL.md](skills/ask-gemini-web/SKILL.md), resolve the bundled runner, and make one call with JSON on stdin:
+Install from a fresh checkout with Node.js 22.12 or later.
+
+```sh
+git clone https://github.com/thweki/ask-gemini-web.git
+cd ask-gemini-web
+npm ci
+npm run build
+npm run install:skill
+```
+
+For an existing installation, use `npm run install:skill -- --update` in the last step. Load [SKILL.md](skills/ask-gemini-web/SKILL.md), resolve the bundled runner, and make one call with JSON on stdin:
 
 ```text
 node <skill>/scripts/gemini-draft.mjs run --stdin
