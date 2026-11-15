@@ -2,6 +2,7 @@ import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { Gemini, parseModeLabel } from '../src/gemini.js';
+import { selectForTask } from '../src/selection.js';
 import { domPage } from './support/dom-page.js';
 
 const fixture = await readFile(new URL('./fixtures/gemini-gem-menu.html', import.meta.url), 'utf8');
@@ -46,6 +47,61 @@ test('new menu selects and verifies models and excludes nested thinking radios e
   assert.equal((window as any).sendCount, 0);
 });
 
+test('repeated discovery and task selection work with or without Escape dismissal', async () => {
+  for (const ignoreEscape of [false, true]) {
+    const { document, gemini, window } = setup();
+    const state = window as any;
+    state.ignoreMenuEscape = ignoreEscape;
+    const trigger = document.querySelector('gem-button button')!;
+    assert.equal(trigger.getAttribute('aria-expanded'), null);
+    assert.equal(trigger.getAttribute('aria-controls'), null);
+    assert.equal((await gemini.models()).current, '4 Hydrogen');
+    assert.equal((await gemini.models()).current, '4 Hydrogen');
+    assert.equal(state.modelTriggerClicks, ignoreEscape ? 1 : 2);
+    assert.equal((await gemini.selectModel('4 Argon')).name, '4 Argon');
+    assert.equal((await gemini.models()).current, '4 Argon');
+    const selected = await selectForTask(gemini, {
+      taskText: 'Write a short article', model: '4 Hydrogen', thinking: 'high',
+    });
+    assert.equal(selected.model.name, '4 Hydrogen');
+    assert.equal(selected.thinking.id, 'high');
+    assert.equal(state.sendCount, 0);
+  }
+});
+
+test('opening reuses visible fallback menus and ignores stale aria-expanded on hidden menus', async () => {
+  for (const fallback of ['dedicated', 'gem-menu', 'role-menu']) {
+    let html = fixture;
+    if (fallback !== 'dedicated') html = html.replace('data-test-id="gem-mode-menu"', '');
+    if (fallback === 'role-menu') html = html.replace('<gem-menu ', '<div ').replace('</gem-menu>', '</div>')
+      .replace("document.querySelector('gem-menu')", "document.querySelector('[role=menu]')");
+    const { document, gemini, window } = setup(html);
+    (window as any).ignoreMenuEscape = true;
+    document.querySelector('gem-button button')!.setAttribute('aria-expanded', 'true');
+    assert.equal((await gemini.models()).current, '4 Hydrogen');
+    assert.equal((await gemini.models()).current, '4 Hydrogen');
+    assert.equal((window as any).modelTriggerClicks, 1);
+  }
+});
+
+test('discovery waits for delayed Escape dismissal before returning', async () => {
+  const { document, gemini, window } = setup();
+  (window as any).menuEscapeDelay = 30;
+  assert.equal((await gemini.models()).current, '4 Hydrogen');
+  assert.equal(document.querySelector<HTMLElement>('gem-menu')!.hidden, true);
+});
+
+test('a delayed menu open is awaited without clicking the toggle again', async () => {
+  const { document, gemini } = setup();
+  let clicks = 0;
+  document.querySelector<HTMLElement>('gem-button button')!.onclick = () => {
+    clicks++;
+    setTimeout(() => { document.querySelector<HTMLElement>('gem-menu')!.hidden = false; }, 30);
+  };
+  assert.equal((await gemini.models()).current, '4 Hydrogen');
+  assert.equal(clicks, 1);
+});
+
 test('same-menu thinking expands and selects low, medium, high without exposing models as levels', async () => {
   const { gemini, window } = setup();
   assert.equal((await gemini.thinking()).current, 'medium');
@@ -85,6 +141,7 @@ test('visible-menu fallbacks prefer the dedicated gem-menu and reject ambiguity,
   }
   {
     const { document, gemini } = setup();
+    document.querySelector('gem-menu')!.removeAttribute('hidden');
     const other = document.querySelector('gem-menu')!.cloneNode(true) as Element;
     other.removeAttribute('hidden'); document.body.appendChild(other);
     await assert.rejects(gemini.models(), { code: 'AMBIGUOUS_UI' });
@@ -96,11 +153,13 @@ test('visible-menu fallbacks prefer the dedicated gem-menu and reject ambiguity,
   }
   {
     const { document, gemini } = setup();
-    document.querySelector<HTMLElement>('gem-button button')!.onclick = () => {};
+    let clicks = 0;
+    document.querySelector<HTMLElement>('gem-button button')!.onclick = () => { clicks++; };
     let now = 0;
     const time = mock.method(Date, 'now', () => { now += 20000; return now; });
     try { await assert.rejects(gemini.models(), { code: 'MODEL_MENU_UNKNOWN' }); }
     finally { time.mock.restore(); }
+    assert.equal(clicks, 1);
   }
 });
 

@@ -54,8 +54,12 @@ export function domPage(html: string) {
       const element = this.one() as HTMLElement;
       element.onmouseenter?.call(element, new window.Event('mouseenter') as MouseEvent);
     }
-    async waitFor({ state }: { state: string }) {
-      if ((this.resolve().length === 1 && visible(this.one())) !== (state === 'visible')) throw new Error('Fixture visibility mismatch');
+    async waitFor({ state, timeout = 0 }: { state: string; timeout?: number }) {
+      const deadline = Date.now() + timeout;
+      while ((this.resolve().length === 1 && visible(this.one())) !== (state === 'visible')) {
+        if (Date.now() >= deadline) throw new Error('Fixture visibility mismatch');
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
     }
   }
   function locate(roots: () => ParentNode[], selector: string): DomLocator {

@@ -57,6 +57,8 @@ async function waitVisible(page: Page, candidates: string[], timeout = 15000) {
 }
 
 export class Gemini {
+  private modelMenu?: Locator;
+
   constructor(public page: Page) { page.setDefaultTimeout(8000); }
 
   async auth(): Promise<Auth> {
@@ -121,11 +123,28 @@ export class Gemini {
     return trigger;
   }
 
-  private async controlledMenu(trigger: Locator): Promise<Locator> {
+  private async controlledMenu(trigger: Locator): Promise<Locator>;
+  private async controlledMenu(trigger: Locator, visibleOnly: true): Promise<Locator | undefined>;
+  private async controlledMenu(trigger: Locator, visibleOnly = false): Promise<Locator | undefined> {
     const id = await trigger.getAttribute('aria-controls');
-    if (id !== null) return this.menuById(id);
+    if (id !== null) {
+      // Even the visibility probe must fail closed on invalid controls, never use a fallback.
+      if (!id || !/^[\w-]+$/.test(id)) throw new DraftError('MODEL_MENU_UNKNOWN', '菜单缺少有效的 aria-controls，停止选择。');
+      if (visibleOnly) {
+        const menu = this.page.locator(`#${id}`);
+        const count = await menu.count();
+        if (!count || (count === 1 && !await menu.isVisible())) return;
+      }
+      return this.menuById(id);
+    }
     // The combined mode/thinking picker does not connect its trigger with aria-controls.
-    const menu = await waitVisible(this.page, ['gem-menu[data-test-id="gem-mode-menu"]', 'gem-menu[role="menu"]', '[role="menu"]']);
+    let candidates = ['gem-menu[data-test-id="gem-mode-menu"]', 'gem-menu[role="menu"]', '[role="menu"]'];
+    // A hidden dedicated picker must be opened, not replaced by an unrelated visible menu.
+    for (const selector of candidates) {
+      if (await this.page.locator(selector).count()) { candidates = [selector]; break; }
+    }
+    const menu = visibleOnly ? await firstVisible(this.page, candidates) : await waitVisible(this.page, candidates);
+    if (!menu && visibleOnly) return;
     if (!menu || await menu.getAttribute('role') !== 'menu') {
       throw new DraftError('MODEL_MENU_UNKNOWN', '无法唯一确认可见的模型菜单，停止选择。');
     }
@@ -145,14 +164,24 @@ export class Gemini {
 
   private async openModels() {
     const trigger = await this.modelTrigger();
-    if (await trigger.getAttribute('aria-expanded') !== 'true') await trigger.click();
-    return { trigger, menu: await this.controlledMenu(trigger) };
+    // The live combined picker has no aria-expanded; clicking an open picker closes it.
+    let menu = await this.controlledMenu(trigger, true);
+    if (!menu) {
+      await trigger.click();
+      menu = await this.controlledMenu(trigger);
+    }
+    this.modelMenu = menu;
+    return { trigger, menu };
   }
 
   private async closeMenus() {
     // A submenu and its parent can require separate Escape events.
     await this.page.keyboard.press('Escape');
     await this.page.keyboard.press('Escape');
+    // Allow dismissal animations to finish. Some combined pickers ignore Escape;
+    // keep their menu reusable on the next open instead of failing or toggling it.
+    try { await this.modelMenu?.waitFor({ state: 'hidden', timeout: 500 }); }
+    catch { /* Dismissal is best effort; openModels rechecks actual visibility. */ }
   }
 
   private async options(root: Locator, kind: 'model' | 'thinking' = 'model', inline = false) {

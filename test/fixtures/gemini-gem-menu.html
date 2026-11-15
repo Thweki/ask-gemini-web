@@ -30,6 +30,9 @@
 <button data-test-id="send-button">Send</button>
 <script>
   window.sendCount = 0;
+  window.modelTriggerClicks = 0;
+  window.ignoreMenuEscape = false;
+  window.menuEscapeDelay = 0;
   const trigger = document.querySelector('gem-button button');
   const menu = document.querySelector('gem-menu');
   const expander = menu.querySelector('[value="thinking_level"]');
@@ -42,7 +45,7 @@
     trigger.setAttribute('aria-label', '打开模式选择器，当前模式为“' + model + ' ' + thinking + '”');
   }
   function close() { menu.hidden = true; levels.hidden = true; expander.setAttribute('aria-expanded', 'false'); }
-  trigger.onclick = () => { menu.hidden = !menu.hidden; };
+  trigger.onclick = () => { window.modelTriggerClicks++; menu.hidden = !menu.hidden; };
   expander.onclick = () => {
     const expanded = expander.getAttribute('aria-expanded') !== 'true';
     expander.setAttribute('aria-expanded', String(expanded)); levels.hidden = !expanded;
@@ -58,6 +61,9 @@
     radios.forEach(option => option.setAttribute('aria-checked', String(option === item)));
     thinking = item.querySelector('span').textContent; updateTrigger(); close();
   }; });
-  document.addEventListener('keydown', event => { if (event.key === 'Escape') close(); });
+  document.addEventListener('keydown', event => { if (event.key === 'Escape' && !window.ignoreMenuEscape) {
+    if (window.menuEscapeDelay) setTimeout(close, window.menuEscapeDelay);
+    else close();
+  } });
   document.querySelector('[data-test-id="send-button"]').onclick = () => { window.sendCount++; };
 </script>

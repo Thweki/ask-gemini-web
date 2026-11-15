@@ -519,6 +519,7 @@ test('combined picker rejects ambiguous menus and never falls back from invalid 
   try {
     const p = await page(ctx); const gemini = new Gemini(p);
     await p.locator('gem-menu').evaluate(element => {
+      (element as HTMLElement).hidden = false;
       const other = element.cloneNode(true) as HTMLElement;
       other.id = 'ambiguous-menu'; other.hidden = false; element.parentElement!.append(other);
     });
