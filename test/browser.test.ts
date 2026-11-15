@@ -455,3 +455,77 @@ test('restored old conversation after model selection is rejected before submit'
     assert.equal(await ctx.pages()[0].evaluate(() => (window as any).sendCount), 0);
   } finally { Gemini.prototype.selectThinking = original; await ctx.close(); await rm(home, { recursive: true, force: true, maxRetries: 5 }); }
 });
+
+test('Chinese combined mode picker is found by its label or parent marker without aria-controls', async () => {
+  const html = await readFile(new URL('./fixtures/gemini-gem-menu.html', import.meta.url), 'utf8');
+  for (const via of ['label', 'parent']) {
+    const ctx = await context(html);
+    try {
+      const p = await page(ctx); const gemini = new Gemini(p);
+      if (via === 'label') await p.locator('gem-button').evaluate(element => element.removeAttribute('data-test-id'));
+      else await p.locator('gem-button button').evaluate(element => element.removeAttribute('aria-label'));
+      const result = await gemini.models();
+      assert.equal(result.current, '4 Hydrogen');
+      assert.deepEqual(result.models.map(model => model.id), ['3-5-flash-lite', '4-hydrogen', '3-1-pro', '4-argon', '4-carbon']);
+      assert.equal(result.models[1].mode, '日常帮助');
+      assert.equal(result.models[4].availability, 'unavailable');
+      assert.equal((await gemini.selectModel('4-argon')).name, '4 Argon');
+      assert.equal((await gemini.models()).current, '4 Argon');
+      await assert.rejects(gemini.selectModel('4-carbon'), { code: 'MODEL_UNAVAILABLE' });
+      assert.equal(await p.evaluate(() => (window as any).sendCount), 0);
+    } finally { await ctx.close(); }
+  }
+});
+
+test('Chinese inline thinking uses only its expanded section and never becomes a model option', async () => {
+  const html = await readFile(new URL('./fixtures/gemini-gem-menu.html', import.meta.url), 'utf8');
+  const ctx = await context(html);
+  try {
+    const p = await page(ctx); const gemini = new Gemini(p);
+    assert.equal((await gemini.thinking()).current, 'medium');
+    assert.deepEqual((await gemini.thinking()).levels.map(level => level.id), ['low', 'medium', 'high']);
+    for (const [label, id] of [['低', 'low'], ['高', 'high'], ['中', 'medium']]) {
+      assert.equal((await gemini.selectThinking(label)).id, id);
+      assert.equal((await gemini.thinking()).current, id);
+    }
+    await p.locator('[value="thinking_level"]').evaluate(element => {
+      element.setAttribute('aria-expanded', 'true');
+      (element.querySelector('.thinking-levels') as HTMLElement).hidden = false;
+    });
+    assert.equal((await gemini.models()).models.length, 5);
+    await assert.rejects(gemini.selectThinking('xhigh'), { code: 'THINKING_UNAVAILABLE' });
+    assert.equal(await p.evaluate(() => (window as any).sendCount), 0);
+  } finally { await ctx.close(); }
+});
+
+test('combined Hydrogen 中 trigger verifies current model and thinking using text or aria-label', async () => {
+  const html = await readFile(new URL('./fixtures/gemini-gem-menu.html', import.meta.url), 'utf8');
+  const ctx = await context(html);
+  try {
+    const p = await page(ctx); const gemini = new Gemini(p);
+    await p.locator('[aria-checked]').evaluateAll(elements => elements.forEach(element => element.removeAttribute('aria-checked')));
+    assert.equal((await gemini.models()).current, '4 Hydrogen');
+    assert.equal((await gemini.thinking()).current, 'medium');
+    await p.locator('gem-button button').evaluate(element => { element.textContent = ''; });
+    assert.equal((await gemini.models()).current, '4 Hydrogen');
+    assert.equal((await gemini.thinking()).current, 'medium');
+    assert.equal(await p.evaluate(() => (window as any).sendCount), 0);
+  } finally { await ctx.close(); }
+});
+
+test('combined picker rejects ambiguous menus and never falls back from invalid aria-controls', async () => {
+  const html = await readFile(new URL('./fixtures/gemini-gem-menu.html', import.meta.url), 'utf8');
+  const ctx = await context(html);
+  try {
+    const p = await page(ctx); const gemini = new Gemini(p);
+    await p.locator('gem-menu').evaluate(element => {
+      const other = element.cloneNode(true) as HTMLElement;
+      other.id = 'ambiguous-menu'; other.hidden = false; element.parentElement!.append(other);
+    });
+    await assert.rejects(gemini.models(), { code: 'AMBIGUOUS_UI' });
+    await p.locator('#ambiguous-menu').evaluate(element => element.remove());
+    await p.locator('gem-button button').evaluate(element => element.setAttribute('aria-controls', 'invalid id'));
+    await assert.rejects(gemini.models(), { code: 'MODEL_MENU_UNKNOWN' });
+    assert.equal(await p.evaluate(() => (window as any).sendCount), 0);
+  } finally { await ctx.close(); }
+});

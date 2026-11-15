@@ -7,7 +7,7 @@ import { effortId } from './routing.js';
 export const selectors = {
   composer: ['rich-textarea .ql-editor[contenteditable="true"]', 'rich-textarea [contenteditable="true"]', '[role="textbox"][contenteditable="true"]', 'textarea[aria-label]'],
   account: ['[aria-label*="Google Account"]', '[aria-label*="Google 账号"]', '[aria-label*="Google 帐号"]', '[aria-label*="Google 帐户"]', '[aria-label*="Google 帳戶"]', '[aria-label*="Google 帳號"]', '[aria-label*="Google アカウント"]'],
-  model: ['button[data-test-id="bard-mode-menu-button"]', 'button[data-test-id="model-selector"]', 'button[aria-label*="Choose a model"]', 'button[aria-label*="Open mode picker"]', 'button[aria-label*="选择模型"]', 'button[aria-label*="选择模式"]', '.model-switcher button'],
+  model: ['button[data-test-id="bard-mode-menu-button"]', '[data-test-id="bard-mode-menu-button"] button', 'button[aria-label*="打开模式选择器"]', 'button[data-test-id="model-selector"]', 'button[aria-label*="Choose a model"]', 'button[aria-label*="Open mode picker"]', 'button[aria-label*="选择模型"]', 'button[aria-label*="选择模式"]', '.model-switcher button'],
   overlay: '[role="menu"]:visible, [role="listbox"]:visible, .cdk-overlay-pane:visible',
   options: '[role="menuitemradio"], [role="menuitem"], [role="option"], button[data-test-id*="mode-option"], button.bard-mode-list-button, button[data-test-id*="model-option"], button[data-test-id*="bard-mode-option"]',
   send: ['button[data-test-id="send-button"]', 'button[aria-label="Send message"]', 'button[aria-label="Send"]', 'button[aria-label="发送消息"]', 'button[aria-label="发送"]', 'button.send-button'],
@@ -25,6 +25,15 @@ export type Model = { id: string; name: string; mode?: string; description: stri
 export type ThinkingOption = Model;
 const normalize = (text: string) => text.replace(/\s+/g, ' ').trim().toLocaleLowerCase();
 export const modelId = (name: string) => normalize(name).replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '');
+
+export function parseModeLabel(text: string, ariaLabel = '') {
+  const announced = ariaLabel.match(/(?:当前模式为|current mode(?: is)?)[，,:：\s]*[“"「]?([^”"」]+)[”"」]?/i)?.[1];
+  const words = (text.trim() || announced || '').trim().split(/\s+/);
+  const thinking = effortId(words.at(-1) || '');
+  return { model: (thinking ? words.slice(0, -1) : words).join(' '), thinking };
+}
+
+const inlineThinking = 'gem-menu-item[value="thinking_level"], gem-menu-item.expandable';
 
 async function firstVisible(page: Page, candidates: string[]): Promise<Locator | undefined> {
   for (const selector of candidates) {
@@ -114,7 +123,13 @@ export class Gemini {
 
   private async controlledMenu(trigger: Locator): Promise<Locator> {
     const id = await trigger.getAttribute('aria-controls');
-    return this.menuById(id);
+    if (id !== null) return this.menuById(id);
+    // The combined mode/thinking picker does not connect its trigger with aria-controls.
+    const menu = await waitVisible(this.page, ['gem-menu[data-test-id="gem-mode-menu"]', 'gem-menu[role="menu"]', '[role="menu"]']);
+    if (!menu || await menu.getAttribute('role') !== 'menu') {
+      throw new DraftError('MODEL_MENU_UNKNOWN', '无法唯一确认可见的模型菜单，停止选择。');
+    }
+    return menu;
   }
 
   private async menuById(id: string | null, code = 'MODEL_MENU_UNKNOWN'): Promise<Locator> {
@@ -140,9 +155,14 @@ export class Gemini {
     await this.page.keyboard.press('Escape');
   }
 
-  private async options(root: Locator, kind: 'model' | 'thinking' = 'model') {
+  private async options(root: Locator, kind: 'model' | 'thinking' = 'model', inline = false) {
     // Only inspect a newly opened model menu, never arbitrary buttons in the chat.
-    const candidates = root.locator(selectors.options);
+    const candidates = root.locator(inline
+      ? inlineThinking.split(', ').flatMap(section => [
+        `${section}[aria-expanded="true"] [role="menuitemradio"]`,
+        `${section}[aria-expanded="true"] ~ [role="menuitemradio"]`,
+      ]).join(', ')
+      : selectors.options);
     await candidates.first().waitFor({ state: 'visible' });
     const collected: { model: Model; locator: Locator }[] = [];
     for (let i = 0; i < await candidates.count(); i++) {
@@ -150,6 +170,7 @@ export class Gemini {
       if (!await locator.isVisible()) continue;
       const data = await locator.evaluate(element => ({
         submenu: element.getAttribute('aria-haspopup') === 'true' || element.getAttribute('aria-haspopup') === 'menu',
+        thinkingSection: !!element.closest('gem-menu-item[value="thinking_level"], gem-menu-item.expandable'),
         text: (element as HTMLElement).innerText,
         label: element.getAttribute('aria-label'),
         disabled: element.hasAttribute('disabled') || element.getAttribute('aria-disabled') === 'true',
@@ -158,10 +179,12 @@ export class Gemini {
         upgrade: !!element.querySelector('a[href*="upgrade"], a[href*="subscriptions"]'),
         locked: !!element.querySelector('[data-mat-icon-name="lock"], [aria-label="Locked"], [aria-label="已锁定"]'),
       }));
-      if (data.submenu) continue;
+      if (data.submenu || (kind === 'model' && data.thinkingSection)) continue;
       const lines = data.text.split('\n').map(line => line.trim()).filter(line => line && !/^(check|check_circle|lock|expand_more|keyboard_arrow_down|arrow_forward|done)$/i.test(line));
       const label = lines[0] || data.label?.trim();
       if (!label || /^(close|cancel|关闭|取消)$/i.test(label)) continue;
+      // Some versions render expanded thinking radios as siblings in the same menu.
+      if (kind === 'model' && effortId(label)) continue;
       // Gemini can put a localized use-case label before the actual model name.
       const modelLines = kind === 'model' ? lines.filter(line => /^(?:gemini\s+\S|(?:gemini\s+)?\d+(?:\.\d+)*[\s-]+[\p{L}]|(?:hydrogen|argon|carbon|flash(?:[ -]lite)?|pro)\b)/iu.test(line)) : [];
       if (modelLines.length > 1) throw new DraftError('AMBIGUOUS_MODELS', '同一选项出现多个型号，停止选择。');
@@ -188,11 +211,19 @@ export class Gemini {
     try {
       const models = (await this.options(menu)).map(item => item.model);
       const selected = models.filter(model => model.selected);
-      const triggerLines = (await trigger.innerText()).split('\n').map(normalize);
-      const current = selected.length ? selected : models.filter(model => [model.name, model.mode].some(value => value && triggerLines.includes(normalize(value))));
+      const current = selected.length ? selected : await this.modelsMatchingTrigger(models, trigger);
       if (current.length !== 1) throw new DraftError('MODEL_CURRENT_UNKNOWN', '无法唯一确认当前模型。');
       return { current: current[0].name, models };
     } finally { await this.closeMenus(); }
+  }
+
+  private async modelsMatchingTrigger(models: Model[], trigger: Locator) {
+    const text = await trigger.innerText();
+    const label = parseModeLabel(text, await trigger.getAttribute('aria-label') || '');
+    const labels = [...text.split('\n'), label.model].map(normalize);
+    const unversioned = (name: string) => normalize(name).replace(/^(?:gemini\s+)?\d+(?:\.\d+)*[\s-]+/u, '');
+    return models.filter(model => [model.name, model.mode].some(value => value && labels.includes(normalize(value)))
+      || labels.includes(unversioned(model.name)));
   }
 
   async selectModel(requested: string): Promise<Model> {
@@ -209,8 +240,8 @@ export class Gemini {
       // Reopen and verify selected state rather than assuming the click succeeded.
       const reopened = await this.openModels();
       const selected = (await this.options(reopened.menu)).filter(item => item.model.selected);
-      const triggerLines = (await trigger.innerText()).split('\n').map(normalize);
-      if (selected.length ? selected.length !== 1 || selected[0].model.id !== model.id : !triggerLines.includes(normalize(model.name))) {
+      const current = selected.length ? selected.map(item => item.model) : await this.modelsMatchingTrigger(options.map(item => item.model), trigger);
+      if (current.length !== 1 || current[0].id !== model.id) {
         throw new DraftError('MODEL_SELECTION_UNVERIFIED', `无法确认模型已切换为“${model.name}”，任务未发送。`);
       }
       return { ...model, selected: true };
@@ -219,23 +250,40 @@ export class Gemini {
 
   private async openThinking() {
     const { menu } = await this.openModels();
-    const triggers = menu.locator('[role="menuitem"][aria-haspopup]').filter({ hasText: /thinking|reasoning|思考|推理/i });
-    if (await triggers.count() !== 1) throw new DraftError('THINKING_MENU_UNKNOWN', '无法唯一识别思考等级子菜单。');
-    const trigger = triggers.first();
-    const id = await trigger.getAttribute('aria-controls');
-    if (!id || id === await menu.getAttribute('id')) throw new DraftError('THINKING_MENU_UNKNOWN', '无法确认独立的思考等级子菜单，停止选择。');
-    // Real Gemini expands this submenu on hover; click alone does not reliably open it.
-    await trigger.hover();
-    return await this.menuById(id, 'THINKING_MENU_UNKNOWN');
+    const submenus = menu.locator('[role="menuitem"][aria-haspopup]:not([aria-haspopup="false"])').filter({ hasText: /thinking|reasoning|思考|推理/i });
+    if (await submenus.count()) {
+      if (await submenus.count() !== 1) throw new DraftError('THINKING_MENU_UNKNOWN', '无法唯一识别思考等级子菜单。');
+      const trigger = submenus.first();
+      const id = await trigger.getAttribute('aria-controls');
+      if (!id || id === await menu.getAttribute('id')) throw new DraftError('THINKING_MENU_UNKNOWN', '无法确认独立的思考等级子菜单，停止选择。');
+      // The old picker expands on hover and must always identify an independent submenu.
+      await trigger.hover();
+      return { menu: await this.menuById(id, 'THINKING_MENU_UNKNOWN'), inline: false };
+    }
+    const inline = menu.locator(inlineThinking).filter({ hasText: /thinking|reasoning|思考|推理/i });
+    if (await inline.count()) {
+      if (await inline.count() !== 1) throw new DraftError('THINKING_MENU_UNKNOWN', '无法唯一识别思考等级展开控件。');
+      const trigger = inline.first();
+      if (await trigger.getAttribute('aria-expanded') !== 'true') await trigger.click();
+      if (await trigger.getAttribute('aria-expanded') !== 'true') throw new DraftError('THINKING_MENU_UNKNOWN', '无法确认思考等级已展开。');
+      return { menu, inline: true };
+    }
+    throw new DraftError('THINKING_MENU_UNKNOWN', '无法唯一识别思考等级控件。');
   }
 
   async thinking(): Promise<{ current: string | null; levels: ThinkingOption[] }> {
     await this.requireLogin();
     try {
-      const menu = await this.openThinking();
-      const levels = (await this.options(menu, 'thinking')).map(({ model }) => model);
+      const { menu, inline } = await this.openThinking();
+      const levels = (await this.options(menu, 'thinking', inline)).map(({ model }) => model);
       const selected = levels.filter(level => level.selected);
-      return { current: selected.length === 1 ? selected[0].id : null, levels };
+      if (!selected.length && inline) {
+        const trigger = await this.modelTrigger();
+        const current = parseModeLabel(await trigger.innerText(), await trigger.getAttribute('aria-label') || '').thinking;
+        if (current && levels.filter(level => level.id === current).length === 1) levels.find(level => level.id === current)!.selected = true;
+      }
+      const current = levels.filter(level => level.selected);
+      return { current: current.length === 1 ? current[0].id : null, levels };
     } finally { await this.closeMenus(); }
   }
 
@@ -243,8 +291,8 @@ export class Gemini {
     await this.requireLogin();
     const wanted = effortId(requested) || requested;
     try {
-      const menu = await this.openThinking();
-      const items = await this.options(menu, 'thinking');
+      const { menu, inline } = await this.openThinking();
+      const items = await this.options(menu, 'thinking', inline);
       const matched = items.filter(({ model }) => model.id === wanted);
       if (matched.length !== 1 || matched[0].model.availability !== 'available') throw new DraftError('THINKING_UNAVAILABLE', `页面未提供可用思考等级“${requested}”。`);
       await matched[0].locator.click();

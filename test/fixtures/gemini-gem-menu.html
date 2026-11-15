@@ -1,0 +1,63 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Offline Chinese Gemini combined mode picker</title>
+<style>gem-button, gem-menu, gem-menu-item { display: block; } [hidden] { display: none !important; }</style>
+<button aria-label="Google 账号">Account</button>
+<bard-mode-switcher data-test-id="bard-mode-switcher">
+  <gem-button data-test-id="bard-mode-menu-button">
+    <button aria-label="打开模式选择器，当前模式为“Hydrogen 中”">Hydrogen<br>中</button>
+  </gem-button>
+</bard-mode-switcher>
+<div data-test-id="bard-mode-popover-menu">
+  <gem-menu role="menu" data-test-id="gem-mode-menu" id="ng-menu-fixture" hidden>
+    <gem-menu-item role="menuitemradio" data-test-id="bard-mode-option-flash" aria-checked="false"><span>快速解答</span><br><span>3.5 Flash-Lite</span></gem-menu-item>
+    <gem-menu-item role="menuitemradio" data-test-id="bard-mode-option-hydrogen" aria-checked="true"><span>日常帮助</span><br><span>4 Hydrogen</span></gem-menu-item>
+    <gem-menu-item role="menuitemradio" aria-checked="false"><span>深度研究</span><br><span>3.1 Pro</span></gem-menu-item>
+    <gem-menu-item role="menuitemradio" aria-checked="false"><span>代码与分析</span><br><span>4 Argon</span></gem-menu-item>
+    <gem-menu-item role="menuitemradio" data-test-id="bard-mode-option-upsell_MODE_CATEGORY_ULTRA" aria-checked="false"><span>高难任务</span><br><span>4 Carbon</span><br><span data-mat-icon-name="lock">lock</span></gem-menu-item>
+    <mat-divider></mat-divider>
+    <gem-menu-item value="thinking_level" class="expandable" role="menuitem" aria-haspopup="false" aria-expanded="false">
+      <span> 思考等级 </span><span>expand_more</span>
+      <div class="thinking-levels" hidden>
+        <gem-menu-item role="menuitemradio" aria-checked="false"><span>低</span><br><span>Fast and efficient</span></gem-menu-item>
+        <gem-menu-item role="menuitemradio" aria-checked="true"><span>中</span><br><span>深度适中</span></gem-menu-item>
+        <gem-menu-item role="menuitemradio" aria-checked="false"><span>高</span><br><span>超级详尽</span></gem-menu-item>
+      </div>
+    </gem-menu-item>
+  </gem-menu>
+</div>
+<rich-textarea><div class="ql-editor" contenteditable="true" role="textbox"></div></rich-textarea>
+<button data-test-id="send-button">Send</button>
+<script>
+  window.sendCount = 0;
+  const trigger = document.querySelector('gem-button button');
+  const menu = document.querySelector('gem-menu');
+  const expander = menu.querySelector('[value="thinking_level"]');
+  const levels = expander.querySelector('.thinking-levels');
+  const models = Array.from(menu.children).filter(element => element.getAttribute('role') === 'menuitemradio');
+  const radios = Array.from(levels.children);
+  let model = 'Hydrogen', thinking = '中';
+  function updateTrigger() {
+    trigger.innerHTML = model + '<br>' + thinking;
+    trigger.setAttribute('aria-label', '打开模式选择器，当前模式为“' + model + ' ' + thinking + '”');
+  }
+  function close() { menu.hidden = true; levels.hidden = true; expander.setAttribute('aria-expanded', 'false'); }
+  trigger.onclick = () => { menu.hidden = !menu.hidden; };
+  expander.onclick = () => {
+    const expanded = expander.getAttribute('aria-expanded') !== 'true';
+    expander.setAttribute('aria-expanded', String(expanded)); levels.hidden = !expanded;
+  };
+  models.forEach(item => { item.onclick = () => {
+    if (item.querySelector('[data-mat-icon-name="lock"]')) return;
+    models.forEach(option => option.setAttribute('aria-checked', String(option === item)));
+    model = item.querySelectorAll('span')[1].textContent.replace(/^\d+(?:\.\d+)*\s+/, '');
+    updateTrigger(); close();
+  }; });
+  radios.forEach(item => { item.onclick = event => {
+    event.stopPropagation();
+    radios.forEach(option => option.setAttribute('aria-checked', String(option === item)));
+    thinking = item.querySelector('span').textContent; updateTrigger(); close();
+  }; });
+  document.addEventListener('keydown', event => { if (event.key === 'Escape') close(); });
+  document.querySelector('[data-test-id="send-button"]').onclick = () => { window.sendCount++; };
+</script>
