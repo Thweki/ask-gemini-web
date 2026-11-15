@@ -14,7 +14,8 @@ const kind = option('--target') || 'both';
 const update = args.includes('--update');
 const skillName = 'ask-gemini-web';
 const source = path.join(root, 'skills', skillName);
-const { home, endpoint } = settings({ home: option('--home') && path.resolve(option('--home')), cdp: option('--cdp') }, root);
+const { home, endpoint, endpointSource } = settings({ home: option('--home') && path.resolve(option('--home')), cdp: option('--cdp') }, root);
+const explicitCdp = endpointSource === 'cli' || endpointSource === 'environment';
 const codexTarget = path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'skills', skillName);
 const agentsTarget = path.join(os.homedir(), '.agents/skills', skillName);
 const destination = option('--destination');
@@ -56,8 +57,13 @@ for (const target of targets) {
   if (update && previousDirectory !== target && existsSync(previousConnection)) {
     console.error('[deprecated] gemini-draft skill connection is deprecated; reusing its saved connection without moving the profile.');
   }
-  const connection = { home: option('--home') || (process.env.ASK_GEMINI_WEB_HOME ?? process.env.GEMINI_DRAFT_HOME) ? home : previous.home || home,
-    endpoint: option('--cdp') || (process.env.ASK_GEMINI_WEB_CDP ?? process.env.GEMINI_DRAFT_CDP) ? endpoint : previous.endpoint || endpoint };
+  const connection = { home: option('--home') || (process.env.ASK_GEMINI_WEB_HOME ?? process.env.GEMINI_DRAFT_HOME) ? home : previous.home || home };
+  if (explicitCdp) Object.assign(connection, { endpoint, explicitCdp: true });
+  else if (previous.endpoint) {
+    connection.endpoint = previous.endpoint;
+    // Unmarked connections from older installs are remembered, not explicit.
+    if (previous.explicitCdp === true) connection.explicitCdp = true;
+  }
   await writeFile(path.join(target, 'connection.json'), JSON.stringify(connection, null, 2) + '\n');
   console.log(JSON.stringify({ installed: target, runner: path.join(target, 'scripts/ask-gemini-web.mjs'), ...connection }));
 }

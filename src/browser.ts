@@ -80,12 +80,12 @@ export function chromeProcessHints(commandLines: string[][], platform = process.
 function chromeCommandLine(line: string) {
   const match = line.trim().match(/^"?(.*?[\\/](?:Google Chrome|Chromium|chrome\.exe|chromium\.exe))"?(?=\s|$)(.*)$/i);
   if (!match) return [];
-  // ps can print unquoted paths with spaces. Each relevant value ends at the
-  // next switch; quoted Windows command lines also retain their full paths.
+  // ps can print unquoted paths with spaces; those end at the next switch.
+  // Quoted values end at their closing quote, even before a positional URL.
   const args = [match[1]];
   for (const flag of ['--user-data-dir', '--remote-debugging-address', '--remote-debugging-port']) {
     const boundary = flag === '--user-data-dir' ? '(?=\\s+"?--|$)' : '(?=\\s|$)';
-    const value = match[2].match(new RegExp(`(?:^|\\s)"?${flag}(?:=|\\s+)(?:"([^"]*)"|'([^']*)'|(.+?))${boundary}`));
+    const value = match[2].match(new RegExp(`(?:^|\\s)"?${flag}(?:=|\\s+)(?:"([^"]*)"|'([^']*)'|([^"'\\s].*?)${boundary})`));
     if (value) args.push(`${flag}=${(value[1] ?? value[2] ?? value[3]).replace(/"$/, '').trim()}`);
   }
   return args;

@@ -62,9 +62,11 @@ draft({ prompt, model?, thinking?, task? }) → { id, state, promptSha256, resul
 
 支持常规单轮文本与基础 Markdown，暂不支持 Canvas、Deep Research 工作流、二进制文件上传及逐字复现。实机测试环境为 Windows、Chrome 157 与 Gemini 中文界面，其他环境可能需要适配调整。基于 [MIT](LICENSE) 许可开源。
 
+安装时只有显式传入 `--cdp` 或 CDP 环境变量才会在 skill 的 `connection.json` 中保存 `explicitCdp: true`；runner 仅为带此标记的地址传递 `--cdp`。普通安装只保存 home，旧版未带标记的连接在 `--update` 后仍允许自动发现。更新会保留已有显式标记；取消固定地址的方法见 API 参考。
+
 显式 CDP 地址（`--cdp`、`ASK_GEMINI_WEB_CDP` 或旧变量 `GEMINI_DRAFT_CDP` 回退）只连接指定浏览器；不可达时返回 `CDP_UNAVAILABLE`（退出码 2），不继续发现、不启动 Chrome、不改写 `connection.json`。请启动该地址上的 Chrome，或移除选项/环境变量以使用自动发现。隐式地址按所选 home 的 `connection.json` → 项目 `ask-gemini-web.config.json` / `gemini-draft.config.json` 的 `cdp` → 默认 `http://127.0.0.1:9222` 选择；不可达时继续探测本机常用端口 9222、9333，再查 Linux/macOS/Windows 运行中 Chrome/Chromium 的进程参数及常见 profile、专用 profile 下的 `DevToolsActivePort`。仅接受本机 HTTP 地址，跳过重复或无效候选。
 
-保留首个可达浏览器，即使尚未登录：`AUTH_LOGGED_OUT`（退出码 3）会报告端点，请运行 `ask-gemini-web login`，在同一个浏览器的 Google 页面手动登录，不会静默换成空 profile。已登录的 agent 浏览器通过**新标签页**复用，不聚焦或导航已有标签页；断开后保留 Chrome。任务成功或明确未发送时关闭任务标签页；发送不确定或采集未完成时保留原标签页供 `resume` 恢复。登录超时和 `login --no-wait` 都保留新标签页供人工登录。仅在使用隐式地址且没有可达 CDP 浏览器时才启动专用 `chrome-profile`；端口被占用时选择空闲回环端口，并以 0600 权限写入 `connection.json`。绝不复制或导出凭证、Cookie 或 profile；本机浏览器访问遵循宿主常规权限流程。
+保留首个可达浏览器，即使尚未登录：`AUTH_LOGGED_OUT`（退出码 3）会报告端点，请运行 `ask-gemini-web login`，在同一个浏览器的 Google 页面手动登录，不会静默换成空 profile。已登录的 agent 浏览器通过**新标签页**复用，不聚焦或导航已有标签页；断开后保留 Chrome。结果已保存（包括导出待重试）或明确未发送时关闭任务标签页；发送不确定或采集未完成时保留原标签页供 `resume` 恢复。登录超时和 `login --no-wait` 都保留新标签页供人工登录。仅在使用隐式地址且没有可达 CDP 浏览器时才启动专用 `chrome-profile`；端口被占用时选择空闲回环端口，并以 0600 权限写入 `connection.json`。绝不复制或导出凭证、Cookie 或 profile；本机浏览器访问遵循宿主常规权限流程。
 
 标准命令与 runner 为 `ask-gemini-web` 和 `scripts/ask-gemini-web.mjs`。旧 `gemini-draft` 命令与 runner 仍可使用，但会在 stderr 输出弃用提示；`--json`/`--compact` 的 stdout 保持可解析。仅在新文件不存在时读取 `gemini-draft.config.json`；仅在对应新变量未设置时读取 `GEMINI_DRAFT_CDP` / `GEMINI_DRAFT_HOME` / `GEMINI_DRAFT_CHROME`（runner 的 APP 变量同理）。
 

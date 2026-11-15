@@ -39,12 +39,15 @@
   const levels = expander.querySelector('.thinking-levels');
   const models = Array.from(menu.children).filter(element => element.getAttribute('role') === 'menuitemradio');
   const radios = Array.from(levels.children);
-  let model = 'Hydrogen', thinking = '中';
+  let model = 'Hydrogen', thinking = '中', closeTimer;
   function updateTrigger() {
     trigger.innerHTML = model + '<br>' + thinking;
     trigger.setAttribute('aria-label', '打开模式选择器，当前模式为“' + model + ' ' + thinking + '”');
   }
-  function close() { menu.hidden = true; levels.hidden = true; expander.setAttribute('aria-expanded', 'false'); }
+  function close() {
+    clearTimeout(closeTimer); closeTimer = undefined;
+    menu.hidden = true; levels.hidden = true; expander.setAttribute('aria-expanded', 'false');
+  }
   trigger.onclick = () => { window.modelTriggerClicks++; menu.hidden = !menu.hidden; };
   expander.onclick = () => {
     const expanded = expander.getAttribute('aria-expanded') !== 'true';
@@ -61,8 +64,8 @@
     radios.forEach(option => option.setAttribute('aria-checked', String(option === item)));
     thinking = item.querySelector('span').textContent; updateTrigger(); close();
   }; });
-  document.addEventListener('keydown', event => { if (event.key === 'Escape' && !window.ignoreMenuEscape) {
-    if (window.menuEscapeDelay) setTimeout(close, window.menuEscapeDelay);
+  document.addEventListener('keydown', event => { if (event.key === 'Escape' && !window.ignoreMenuEscape && !menu.hidden) {
+    if (window.menuEscapeDelay) { if (!closeTimer) closeTimer = setTimeout(close, window.menuEscapeDelay); }
     else close();
   } });
   document.querySelector('[data-test-id="send-button"]').onclick = () => { window.sendCount++; };

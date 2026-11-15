@@ -11,7 +11,7 @@ import { Gemini } from '../src/gemini.js';
 import { Connection, endpointReady, GEMINI } from '../src/browser.js';
 import { compileJob, execute, loadJob, resume, RunStore } from '../src/jobs.js';
 import { settings } from '../src/config.js';
-import { previewSelection } from '../src/selection.js';
+import { previewSelection, selectForTask } from '../src/selection.js';
 
 let browser: Browser;
 const fixture = await readFile(new URL('./fixtures/gemini.html', import.meta.url), 'utf8');
@@ -277,6 +277,27 @@ test('real CDP disconnect preserves uncertain and incomplete tasks for resume wi
       await assert.rejects(execute(cfg, await compileJob({ prompt: 'Never sent' }), () => {}, Connection.open), /Before send/);
       assert.deepEqual(ctx.pages(), existing, 'A certain pre-send failure closes its task tab.');
     } finally { sendFailure.mock.restore(); }
+    const output = path.join(home, 'draft.md');
+    const exportFailure = mock.method(Gemini.prototype, 'submit', async function (this: Gemini, send: Parameters<Gemini['submit']>[0]) {
+      await originalSubmit.call(this, send);
+      await writeFile(output, 'Concurrent user file');
+    });
+    const before = await readdir(cfg.runs);
+    try {
+      await assert.rejects(execute(cfg, await compileJob({ prompt: 'Save before export', output }), () => {}, Connection.open), { code: 'OUTPUT_EXISTS' });
+    } finally { exportFailure.mock.restore(); }
+    const id = (await readdir(cfg.runs)).find(id => !before.includes(id))!;
+    const collected = await store.read(id);
+    assert.equal(collected.state, 'collected');
+    assert.match(await readFile(collected.result!, 'utf8'), /Fixture draft/);
+    assert.deepEqual(ctx.pages(), existing, 'A saved result closes its task tab even when export fails.');
+    const total = await userTab.evaluate(() => localStorage.getItem('totalSends'));
+    await rm(output);
+    const noBrowser = async (): Promise<never> => { throw new Error('Must not reconnect'); };
+    assert.equal((await resume(cfg, id, () => {}, noBrowser)).state, 'complete');
+    assert.match(await readFile(output, 'utf8'), /Fixture draft/);
+    assert.deepEqual(ctx.pages(), existing);
+    assert.equal(await userTab.evaluate(() => localStorage.getItem('totalSends')), total);
     assert.equal(userTab.url(), GEMINI + '/original-user-tab');
     assert.equal(await userTab.evaluate(() => (window as any).sendCount), 0);
   } finally { await ctx.close(); await rm(home, { recursive: true, force: true, maxRetries: 5 }); }
@@ -550,6 +571,37 @@ test('Chinese combined mode picker is found by its label or parent marker withou
       assert.equal((await gemini.selectModel('4-argon')).name, '4 Argon');
       assert.equal((await gemini.models()).current, '4 Argon');
       await assert.rejects(gemini.selectModel('4-carbon'), { code: 'MODEL_UNAVAILABLE' });
+      assert.equal(await p.evaluate(() => (window as any).sendCount), 0);
+    } finally { await ctx.close(); }
+  }
+});
+
+test('Chinese picker tolerates ignored Escape, delayed dismissal and an already-open menu in Playwright', async () => {
+  const html = await readFile(new URL('./fixtures/gemini-gem-menu.html', import.meta.url), 'utf8');
+  for (const scenario of [
+    { ignoreEscape: true, delay: 0, alreadyOpen: false },
+    { ignoreEscape: false, delay: 75, alreadyOpen: false },
+    { ignoreEscape: true, delay: 0, alreadyOpen: true },
+    { ignoreEscape: false, delay: 75, alreadyOpen: true },
+  ]) {
+    const ctx = await context(html);
+    try {
+      const p = await page(ctx); const gemini = new Gemini(p);
+      await p.evaluate(({ ignoreEscape, delay }) => {
+        (window as any).ignoreMenuEscape = ignoreEscape;
+        (window as any).menuEscapeDelay = delay;
+      }, scenario);
+      if (scenario.alreadyOpen) await p.locator('gem-button button').click();
+      for (let i = 0; i < 2; i++) {
+        assert.equal((await gemini.models()).current, '4 Hydrogen');
+        assert.equal(await p.locator('gem-menu').isVisible(), scenario.ignoreEscape);
+      }
+      assert.equal(await p.evaluate(() => (window as any).modelTriggerClicks), scenario.ignoreEscape ? 1 : 2);
+      assert.equal((await gemini.selectModel('4 Argon')).name, '4 Argon');
+      assert.equal((await gemini.models()).current, '4 Argon');
+      const selection = await selectForTask(gemini, { taskText: 'Write an article', model: '4 Hydrogen', thinking: 'high' });
+      assert.equal(selection.model.name, '4 Hydrogen');
+      assert.equal(selection.thinking.id, 'high');
       assert.equal(await p.evaluate(() => (window as any).sendCount), 0);
     } finally { await ctx.close(); }
   }

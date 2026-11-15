@@ -137,6 +137,14 @@ test('macOS and Windows process hints preserve profile paths with spaces and onl
   }
   assert.deepEqual(await processHints('win32', async () => JSON.stringify(`${command} https://gemini.google.com/app`)),
     { profiles: [profile], endpoints: ['http://127.0.0.1:9555'] });
+  // A positional URL immediately after a quoted profile must not become part of it.
+  for (const quote of ['"', "'"]) {
+    assert.deepEqual(await processHints('win32', async () => JSON.stringify(
+      `"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --remote-debugging-port=9555 --user-data-dir=${quote}${profile}${quote} https://gemini.google.com/app`)),
+    { profiles: [profile], endpoints: ['http://127.0.0.1:9555'] });
+    assert.deepEqual(await processHints('darwin', async () => `${executable} --remote-debugging-port=9444 --user-data-dir=${quote}${mac}${quote} https://gemini.google.com/app`),
+      { profiles: [mac], endpoints: ['http://127.0.0.1:9444'] });
+  }
   assert.deepEqual(await processHints('win32', async () => JSON.stringify(`${command} --remote-debugging-address=example.com`)), { profiles: [], endpoints: [] });
   assert.deepEqual(await processHints('win32', async () => { throw new Error('PowerShell unavailable'); }), { profiles: [], endpoints: [] });
   assert.deepEqual(await processHints('win32', async () => 'invalid JSON'), { profiles: [], endpoints: [] });

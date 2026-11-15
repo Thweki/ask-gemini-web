@@ -337,7 +337,7 @@ async function work(config: Settings, store: RunStore, run: Run, notify: (messag
     run.lastError = errorInfo(error);
     await store.save(run);
     throw new DraftError(run.lastError.code, `${run.lastError.message}${run.lastError.code.startsWith('AUTH_') && connection ? `\nCDP：${connection.endpoint}` : ''}\n任务 ID：${run.id}`, error instanceof DraftError ? error.exitCode : 1);
-  } finally { await connection?.disconnect(!completed && run.state !== 'prepared'); }
+  } finally { await connection?.disconnect(!completed && !['prepared', 'collected', 'complete'].includes(run.state)); }
 }
 
 export function runSummary(run: Run) {
