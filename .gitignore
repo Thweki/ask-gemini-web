@@ -2,6 +2,7 @@ node_modules/
 dist/
 .env*
 !.env.example
+.ask-gemini-web/
 .gemini-draft/
 chrome-profile/
 playwright/.auth/

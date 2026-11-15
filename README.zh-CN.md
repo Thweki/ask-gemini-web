@@ -41,7 +41,7 @@ npm run install:skill
 如果已经安装过，最后一步使用 `npm run install:skill -- --update`。加载 [SKILL.md](skills/ask-gemini-web/SKILL.md)，解析内置 runner 路径，并传入 UTF-8 JSON 任务文件执行一次调用（Windows 首选）：
 
 ```text
-node <skill>/scripts/gemini-draft.mjs run job.json
+node <skill>/scripts/ask-gemini-web.mjs run job.json
 ```
 
 ```json
@@ -62,6 +62,10 @@ draft({ prompt, model?, thinking?, task? }) → { id, state, promptSha256, resul
 
 支持常规单轮文本与基础 Markdown，暂不支持 Canvas、Deep Research 工作流、二进制文件上传及逐字复现。实机测试环境为 Windows、Chrome 157 与 Gemini 中文界面，其他环境可能需要适配调整。基于 [MIT](LICENSE) 许可开源。
 
-启动时按顺序探测：配置的 CDP 地址（`--cdp` → `GEMINI_DRAFT_CDP` → 所选 home 的 `connection.json` → 项目 `gemini-draft.config.json` 的 `cdp`，默认 `http://127.0.0.1:9222`），然后是本机常用端口 9222、9333，最后是运行中 Chrome/Chromium 的进程参数及常见 profile、专用 profile 下的 `DevToolsActivePort`。仅接受本机 HTTP 地址，跳过重复或无效候选；配置地址不可达时继续发现。
+启动时按顺序探测：配置的 CDP 地址（`--cdp` → `ASK_GEMINI_WEB_CDP` → 所选 home 的 `connection.json` → 项目 `ask-gemini-web.config.json` 的 `cdp`，默认 `http://127.0.0.1:9222`），然后是本机常用端口 9222、9333，最后是运行中 Chrome/Chromium 的进程参数及常见 profile、专用 profile 下的 `DevToolsActivePort`。仅接受本机 HTTP 地址，跳过重复或无效候选；配置地址不可达时继续发现。
 
-保留首个可达浏览器，即使尚未登录：`AUTH_LOGGED_OUT`（退出码 3）会报告端点，请运行 `gemini-draft login`，在同一个浏览器的 Google 页面手动登录，不会静默换成空 profile。已登录的 agent 浏览器通过**新标签页**复用，不聚焦或导航已有标签页；结束时仅关闭本次创建的标签页，保留 Chrome。`login --no-wait` 会保留新标签页供人工登录。仅当没有可达 CDP 浏览器时才启动专用 `chrome-profile`；端口被占用时选择空闲回环端口，并以 0600 权限写入 `connection.json`。绝不复制或导出凭证、Cookie 或 profile；本机浏览器访问遵循宿主常规权限流程。
+保留首个可达浏览器，即使尚未登录：`AUTH_LOGGED_OUT`（退出码 3）会报告端点，请运行 `ask-gemini-web login`，在同一个浏览器的 Google 页面手动登录，不会静默换成空 profile。已登录的 agent 浏览器通过**新标签页**复用，不聚焦或导航已有标签页；结束时仅关闭本次创建的标签页，保留 Chrome。`login --no-wait` 会保留新标签页供人工登录。仅当没有可达 CDP 浏览器时才启动专用 `chrome-profile`；端口被占用时选择空闲回环端口，并以 0600 权限写入 `connection.json`。绝不复制或导出凭证、Cookie 或 profile；本机浏览器访问遵循宿主常规权限流程。
+
+标准命令与 runner 为 `ask-gemini-web` 和 `scripts/ask-gemini-web.mjs`。旧 `gemini-draft` 命令与 runner 仍可使用，但会在 stderr 输出弃用提示；`--json`/`--compact` 的 stdout 保持可解析。仅在新文件不存在时读取 `gemini-draft.config.json`；仅在对应新变量未设置时读取 `GEMINI_DRAFT_CDP` / `GEMINI_DRAFT_HOME` / `GEMINI_DRAFT_CHROME`（runner 的 APP 变量同理）。
+
+home 顺序：`--home` → 新/旧 HOME 环境变量 → 项目 `home` → 已存在的 `.ask-gemini-web` → 已存在的新平台目录 → 已存在的 `.gemini-draft` 或旧平台目录 → 新平台默认目录。平台默认值为 `~/.local/share/ask-gemini-web` 或 `%LOCALAPPDATA%\ask-gemini-web`（无 LOCALAPPDATA 时用用户目录）；旧目录使用 `gemini-draft`。保留所选 home 的 `connection.json`、`chrome-profile` 和任务记录，不自动复制或迁移 profile。CDP 顺序仍为命令行 → 新/旧环境变量 → 所选 home 的 `connection.json` → 项目 `cdp` → 默认值。

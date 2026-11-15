@@ -8,6 +8,7 @@ import path from 'node:path';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright-core';
 import { DraftError } from './errors.js';
 import { localEndpoint, type Settings } from './config.js';
+import { environment } from './deprecation.js';
 
 export const GEMINI = 'https://gemini.google.com/app';
 export const shutdown = new AbortController();
@@ -21,8 +22,8 @@ export function isGemini(url: string) {
 }
 
 export async function findChrome(override?: string): Promise<string> {
-  const candidates = override ? [path.resolve(override)] : process.env.GEMINI_DRAFT_CHROME
-    ? [path.resolve(process.env.GEMINI_DRAFT_CHROME)]
+  const configured = override || environment('CHROME');
+  const candidates = configured ? [path.resolve(configured)]
     : process.platform === 'win32' ? [
       path.join(process.env.PROGRAMFILES || 'C:\\Program Files', 'Google/Chrome/Application/chrome.exe'),
       path.join(process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)', 'Google/Chrome/Application/chrome.exe'),
@@ -207,7 +208,7 @@ export class Connection {
     public endpoint: string, public started = false) {}
   get browserInfo() { return { started: this.started, endpoint: this.endpoint }; }
   static async ensure(config: Settings, executable?: string) {
-    const startupUrl = `about:blank#gemini-draft-${randomUUID()}`;
+    const startupUrl = `about:blank#ask-gemini-web-${randomUUID()}`;
     const { started, endpoint } = await startChrome(config, executable, startupUrl);
     const connection = await Connection.open({ ...config, endpoint });
     connection.started = started;
@@ -220,7 +221,7 @@ export class Connection {
   }
   static async open(config: Settings) {
     if (!await endpointReady(config.endpoint)) {
-      throw new DraftError('CDP_UNAVAILABLE', '无法连接 Chrome。先运行 gemini-draft browser start 或 gemini-draft login。', 2);
+      throw new DraftError('CDP_UNAVAILABLE', '无法连接 Chrome。先运行 ask-gemini-web browser start 或 ask-gemini-web login。', 2);
     }
     try {
       const browser = await chromium.connectOverCDP(config.endpoint, { noDefaults: true, timeout: 10000 });

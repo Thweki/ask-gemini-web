@@ -113,7 +113,7 @@ test('attached connections own new tabs only; signed-out auth reports endpoint w
       await assert.rejects(new Gemini(page).requireLogin(), error => {
         assert.equal((error as any).code, 'AUTH_LOGGED_OUT');
         assert.equal((error as any).exitCode, 3);
-        assert.match((error as Error).message, /9555.*gemini-draft login/);
+        assert.match((error as Error).message, /9555.*ask-gemini-web login/);
         return true;
       });
       await assert.rejects(access(cfg.profile), { code: 'ENOENT' });

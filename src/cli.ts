@@ -16,7 +16,10 @@ program.exitOverride().configureOutput({
 });
 process.once('SIGINT', () => shutdown.abort(new DraftError('INTERRUPTED', '操作已中断，Chrome 与任务记录已保留。', 130)));
 process.once('SIGTERM', () => shutdown.abort(new DraftError('INTERRUPTED', '操作已中断，Chrome 与任务记录已保留。', 143)));
-program.name('gemini-draft').version('0.2.1')
+if (/^gemini-draft(?:\.(?:mjs|js|cmd|exe))?$/.test(path.basename(process.argv[1] || ''))) {
+  console.error('[deprecated] gemini-draft is deprecated; use ask-gemini-web.');
+}
+program.name('ask-gemini-web').version('0.2.1')
   .description('通过本机 Chrome CDP 复现 Gemini 网页写稿流程；运行时不调用额外模型 API。')
   .option('--cdp <url>', '本机 Chrome CDP 地址（默认使用保存的配置）')
   .option('--home <path>', '专用配置与任务数据目录')
@@ -54,7 +57,7 @@ program.command('ready').description('按保存的配置启动 Chrome，检查�
       const gemini = new Gemini(await connection.page());
       const auth = await gemini.waitForAuth();
       if (auth.status !== 'logged_in') {
-        report({ ready: false, code: `AUTH_${auth.status.toUpperCase()}`, auth, endpoint: connection.endpoint, profile: cfg.profile, browser: connection.browserInfo, next: 'gemini-draft login' });
+        report({ ready: false, code: `AUTH_${auth.status.toUpperCase()}`, auth, endpoint: connection.endpoint, profile: cfg.profile, browser: connection.browserInfo, next: 'ask-gemini-web login' });
         process.exitCode = 3;
         return;
       }
@@ -77,7 +80,7 @@ program.command('login').description('复用或启动 Chrome，由用户在 Goog
       info(`配置的 Chrome 专用目录：${cfg.profile}`);
       if (!started.started) info('正在复用已有 CDP 浏览器，实际登录态目录由该 Chrome 的启动配置决定。');
       info('登录完成后可关闭 CLI，保留 Chrome 供后续命令复用。');
-      if (!options.wait) { report({ ...started, next: 'gemini-draft auth status' }); return; }
+      if (!options.wait) { report({ ...started, next: 'ask-gemini-web auth status' }); return; }
       await page.bringToFront();
       const gemini = new Gemini(page);
       const deadline = Date.now() + options.timeout * 1000;
@@ -94,7 +97,7 @@ program.command('login').description('复用或启动 Chrome，由用户在 Goog
 
 program.command('auth').description('登录状态').command('status').action(async () => locked(async () => {
   const auth = await connected(async connection => ({ ...await new Gemini(await connection.page()).waitForAuth(), endpoint: connection.endpoint }));
-  report({ ...auth, ...(auth.status !== 'logged_in' ? { code: `AUTH_${auth.status.toUpperCase()}`, next: 'gemini-draft login' } : {}) });
+  report({ ...auth, ...(auth.status !== 'logged_in' ? { code: `AUTH_${auth.status.toUpperCase()}`, next: 'ask-gemini-web login' } : {}) });
   if (auth.status !== 'logged_in') process.exitCode = 3;
 }));
 
@@ -128,7 +131,7 @@ program.command('doctor').description('检测 CDP、登录状态和页面适配�
         catch (error) { modelDetection = { status: 'failed', error: errorInfo(error) }; process.exitCode = 4; }
       }
       if (diagnostics.auth.status !== 'logged_in') process.exitCode = 3;
-      return { endpoint: connection.endpoint, chrome, profile: cfg.profile, ...diagnostics, modelDetection, next: diagnostics.auth.status !== 'logged_in' ? 'gemini-draft login' : undefined };
+      return { endpoint: connection.endpoint, chrome, profile: cfg.profile, ...diagnostics, modelDetection, next: diagnostics.auth.status !== 'logged_in' ? 'ask-gemini-web login' : undefined };
     }));
   }));
 

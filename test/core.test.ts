@@ -89,7 +89,7 @@ test('CDP only accepts credential-free local endpoints', () => {
 });
 
 test('saved CDP address survives later processes and explicit settings override it', async () => {
-  const home = await mkdtemp(path.join(os.tmpdir(), 'gemini-draft-config-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'ask-gemini-web-config-'));
   try {
     await writeFile(path.join(home, 'connection.json'), JSON.stringify({ endpoint: 'http://127.0.0.1:9444' }));
     assert.equal(settings({ home }).endpoint, 'http://127.0.0.1:9444');
@@ -100,7 +100,7 @@ test('saved CDP address survives later processes and explicit settings override 
 });
 
 test('job paths resolve relative to job; materials are hashed; variables do not execute or recurse', async () => {
-  const home = await mkdtemp(path.join(os.tmpdir(), 'gemini-draft-core-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'ask-gemini-web-core-'));
   try {
     await mkdir(path.join(home, 'jobs'));
     await writeFile(path.join(home, 'jobs', 'prompt.txt'), '{{topic}} / {{length}}');
@@ -123,7 +123,7 @@ test('job paths resolve relative to job; materials are hashed; variables do not 
 });
 
 test('run store guards IDs, prompt integrity, and concurrent browser access', async () => {
-  const home = await mkdtemp(path.join(os.tmpdir(), 'gemini-draft-store-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'ask-gemini-web-store-'));
   try {
     const store = new RunStore(settings({ home }));
     assert.throws(() => store.directory('../escape'), { code: 'INVALID_RUN_ID' });
@@ -140,26 +140,26 @@ test('run store guards IDs, prompt integrity, and concurrent browser access', as
 });
 
 test('CDP settings precedence is CLI, environment, remembered, project, default', async () => {
-  const cwd = process.cwd(), env = process.env.GEMINI_DRAFT_CDP;
+  const cwd = process.cwd(), env = process.env.ASK_GEMINI_WEB_CDP;
   const home = await mkdtemp(path.join(os.tmpdir(), 'gemini-precedence-'));
   try {
     process.chdir(home);
-    const config = path.join(home, 'gemini-draft.config.json');
+    const config = path.join(home, 'ask-gemini-web.config.json');
     await writeFile(config, JSON.stringify({ cdp: 'http://127.0.0.1:9666' }));
-    delete process.env.GEMINI_DRAFT_CDP;
+    delete process.env.ASK_GEMINI_WEB_CDP;
     assert.equal(settings({ home }).endpoint, 'http://127.0.0.1:9666');
     const connection = path.join(home, 'connection.json');
     await writeFile(connection, JSON.stringify({ endpoint: 'http://127.0.0.1:9555' }));
     assert.equal(settings({ home }).endpoint, 'http://127.0.0.1:9555');
-    process.env.GEMINI_DRAFT_CDP = 'http://127.0.0.1:9444';
+    process.env.ASK_GEMINI_WEB_CDP = 'http://127.0.0.1:9444';
     assert.equal(settings({ home }).endpoint, 'http://127.0.0.1:9444');
     assert.equal(settings({ home, cdp: 'http://127.0.0.1:9777' }).endpoint, 'http://127.0.0.1:9777');
-    delete process.env.GEMINI_DRAFT_CDP;
+    delete process.env.ASK_GEMINI_WEB_CDP;
     await rm(config); await rm(connection);
     assert.equal(settings({ home }).endpoint, 'http://127.0.0.1:9222');
   } finally {
     process.chdir(cwd);
-    if (env === undefined) delete process.env.GEMINI_DRAFT_CDP; else process.env.GEMINI_DRAFT_CDP = env;
+    if (env === undefined) delete process.env.ASK_GEMINI_WEB_CDP; else process.env.ASK_GEMINI_WEB_CDP = env;
     await rm(home, { recursive: true, force: true });
   }
 });

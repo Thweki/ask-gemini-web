@@ -196,7 +196,7 @@ test('successful CLI generation keeps stderr empty for compact/json/quiet modes'
       try { assert.equal(await closed, 3, stdout + stderr); } finally { clearTimeout(timer); }
       const result = JSON.parse(stdout);
       assert.equal(result.endpoint, `http://127.0.0.1:${port}`);
-      assert.equal(result.next, 'gemini-draft login');
+      assert.equal(result.next, 'ask-gemini-web login');
       assert.equal(stderr, '');
       assert.deepEqual(ctx.pages(), existingPages);
       await assert.rejects(access(path.join(home, 'chrome-profile')), { code: 'ENOENT' });
@@ -325,7 +325,7 @@ test('model selection is rejected when the webpage ignores the click', async () 
 
 test('submission collects Markdown and completed resume never sends again', async () => {
   const ctx = await context();
-  const home = await mkdtemp(path.join(os.tmpdir(), 'gemini-draft-e2e-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'ask-gemini-web-e2e-'));
   try {
     const filename = path.join(home, 'job.yaml');
     await writeFile(filename, 'prompt: Write an article\nmodel: Test Reasoning');
@@ -343,7 +343,7 @@ test('submission collects Markdown and completed resume never sends again', asyn
 
 test('lost click acknowledgement resumes original response without duplicate submission', async () => {
   const ctx = await context();
-  const home = await mkdtemp(path.join(os.tmpdir(), 'gemini-draft-resume-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'ask-gemini-web-resume-'));
   const original = Gemini.prototype.submit;
   try {
     const filename = path.join(home, 'job.yaml');
@@ -389,7 +389,7 @@ test('resume opens and closes its own recovery tab when the original target is g
 
 test('ambiguous submission with no original page cannot resend', async () => {
   const ctx = await context();
-  const home = await mkdtemp(path.join(os.tmpdir(), 'gemini-draft-uncertain-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'ask-gemini-web-uncertain-'));
   try {
     const filename = path.join(home, 'job.yaml');
     await writeFile(filename, 'prompt: Never duplicate');
@@ -403,7 +403,7 @@ test('ambiguous submission with no original page cannot resend', async () => {
 
 test('existing output is rejected before creating a task tab or submitting', async () => {
   const ctx = await context();
-  const home = await mkdtemp(path.join(os.tmpdir(), 'gemini-draft-existing-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'ask-gemini-web-existing-'));
   try {
     const filename = path.join(home, 'job.yaml');
     await writeFile(filename, 'prompt: Preserve my file\noutput: draft.md');
@@ -441,7 +441,7 @@ test('export failure after generation leaves a collected result for browser-free
 
 test('restored old conversation after model selection is rejected before submit', async () => {
   const ctx = await context();
-  const home = await mkdtemp(path.join(os.tmpdir(), 'gemini-draft-drift-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'ask-gemini-web-drift-'));
   const original = Gemini.prototype.selectThinking;
   try {
     const filename = path.join(home, 'job.yaml');

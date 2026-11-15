@@ -3,6 +3,7 @@ import path from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 import { z } from 'zod';
 import { DraftError } from './errors.js';
+import { deprecated, environment } from './deprecation.js';
 
 export function localEndpoint(input: string): string {
   let url: URL;
@@ -14,17 +15,17 @@ export function localEndpoint(input: string): string {
   return url.origin;
 }
 
-export function settings(options: { cdp?: string; home?: string }) {
-  const projectFile = path.resolve('gemini-draft.config.json');
+export function settings(options: { cdp?: string; home?: string }, directory = process.cwd()) {
+  const newProjectFile = path.resolve(directory, 'ask-gemini-web.config.json');
+  const oldProjectFile = path.resolve(directory, 'gemini-draft.config.json');
+  const projectFile = existsSync(newProjectFile) ? newProjectFile : oldProjectFile;
   let project: { home?: string; cdp?: string } = {};
   if (existsSync(projectFile)) {
+    if (projectFile === oldProjectFile) deprecated('gemini-draft.config.json', 'ask-gemini-web.config.json');
     try { project = z.object({ home: z.string().min(1).optional(), cdp: z.string().optional() }).strict().parse(JSON.parse(readFileSync(projectFile, 'utf8'))); }
     catch { throw new DraftError('INVALID_CONFIG', `无法解析项目配置：${projectFile}`); }
   }
-  const base = process.platform === 'win32'
-    ? path.join(process.env.LOCALAPPDATA || os.homedir(), 'gemini-draft')
-    : path.join(os.homedir(), '.local', 'share', 'gemini-draft');
-  const home = path.resolve(options.home || process.env.GEMINI_DRAFT_HOME || project.home || base);
+  const home = path.resolve(directory, options.home || environment('HOME') || project.home || defaultHome(directory));
   let remembered: { endpoint?: string } = {};
   const connectionFile = path.join(home, 'connection.json');
   if (existsSync(connectionFile)) {
@@ -35,8 +36,18 @@ export function settings(options: { cdp?: string; home?: string }) {
     home,
     profile: path.join(home, 'chrome-profile'),
     runs: path.join(home, 'runs'),
-    endpoint: localEndpoint(options.cdp || process.env.GEMINI_DRAFT_CDP || remembered.endpoint || project.cdp || 'http://127.0.0.1:9222'),
+    endpoint: localEndpoint(options.cdp || environment('CDP') || remembered.endpoint || project.cdp || 'http://127.0.0.1:9222'),
   };
+}
+
+export function defaultHome(directory = process.cwd(), userHome = os.homedir(), platform = process.platform) {
+  const data = platform === 'win32' ? process.env.LOCALAPPDATA || userHome : path.join(userHome, '.local', 'share');
+  const current = [path.join(directory, '.ask-gemini-web'), path.join(data, 'ask-gemini-web')];
+  const existing = current.find(candidate => existsSync(candidate));
+  if (existing) return existing;
+  const legacy = [path.join(directory, '.gemini-draft'), path.join(data, 'gemini-draft')].find(candidate => existsSync(candidate));
+  if (legacy) { deprecated(legacy, current[1]); return legacy; }
+  return current[1];
 }
 export type Settings = ReturnType<typeof settings>;
 

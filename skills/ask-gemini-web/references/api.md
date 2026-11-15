@@ -6,7 +6,7 @@ Needs Node.js 22.12+ and Chrome. In a source checkout, run `npm ci`, `npm run bu
 
 ## Call
 
-The skill was previously named `gemini-draft`. On a default-path upgrade, `--update` installs `ask-gemini-web` alongside the previous skill and reuses its connection settings. Existing CLI commands and saved job IDs still work.
+The skill and CLI were previously named `gemini-draft`. On a default-path upgrade, `--update` installs `ask-gemini-web` alongside the previous skill and reuses its connection settings. Existing CLI commands and saved job IDs still work.
 
 Q&A uses the same `prompt` input as drafting; even a short answer is saved as Markdown. The goal is to shift the main generation to Gemini web, not promise zero agent-plan usage. Antigravity app availability and Gemini web eligibility are separate checks: [Antigravity FAQ](https://antigravity.google/docs/faq), [Gemini web availability](https://support.google.com/gemini/answer/13575153?hl=en). No region list is hardcoded.
 
@@ -14,7 +14,7 @@ Q&A uses the same `prompt` input as drafting; even a short answer is saved as Ma
 
 ```powershell
 [IO.File]::WriteAllText((Join-Path (Get-Location) 'job.json'), '{"prompt":"请写一篇关于青竹的短文。"}', [Text.UTF8Encoding]::new($false))
-node <skill>/scripts/gemini-draft.mjs run job.json
+node <skill>/scripts/ask-gemini-web.mjs run job.json
 ```
 
 The full 64-character `promptSha256` hashes the rendered prompt, including substituted variables and appended materials, not the JSON file bytes. `run <job.json> --dry-run` reports the same field without using Gemini. ASCII replacement already performed by a shell remains valid UTF-8 and cannot be recovered or reliably detected by the runner.
@@ -43,6 +43,10 @@ Variable names allow Unicode letters, marks and numbers plus underscores, dots a
 
 `ready` is optional diagnostics. On auth errors, `login` opens a new tab in the selected persistent Chrome; human handles Google sign-in/verification. On sandbox/CDP permission errors request the host's normal narrow execution permission. `MODEL_UNAVAILABLE`/`THINKING_UNAVAILABLE` require a changed explicit request; uncertain submission requires original-conversation recovery.
 
-Browser discovery first probes the configured CDP address (`--cdp` → `GEMINI_DRAFT_CDP` → the selected home's `connection.json` → project `gemini-draft.config.json` `cdp`, default `http://127.0.0.1:9222`), then common local ports 9222 and 9333, then running Chrome/Chromium process hints and `DevToolsActivePort` files in known profile locations and the dedicated profile. Only local HTTP endpoints are accepted; duplicate and invalid discovered addresses are skipped. An unreachable configured endpoint allows discovery to continue.
+Browser discovery first probes the configured CDP address (`--cdp` → `ASK_GEMINI_WEB_CDP` → the selected home's `connection.json` → project `ask-gemini-web.config.json` `cdp`, default `http://127.0.0.1:9222`), then common local ports 9222 and 9333, then running Chrome/Chromium process hints and `DevToolsActivePort` files in known profile locations and the dedicated profile. Only local HTTP endpoints are accepted; duplicate and invalid discovered addresses are skipped. An unreachable configured endpoint allows discovery to continue.
 
-The first reachable browser is retained, including when signed out: `AUTH_LOGGED_OUT` (exit 3) reports the endpoint; run `gemini-draft login` and sign in manually at Google in that same browser. There is no silent replacement with a fresh profile. An existing signed-in agent browser is reused through a **new tab**; existing tabs are never focused or navigated. Disconnect closes this session's tabs and leaves Chrome running. `login --no-wait` deliberately leaves its new tab open for manual sign-in. A dedicated `chrome-profile` browser is launched only when no CDP browser is reachable; a busy configured port uses a free loopback port, saved in `connection.json` with mode 0600. Credentials, cookies and profiles are never copied or exported. Follow the host's normal local-browser permission flow.
+The first reachable browser is retained, including when signed out: `AUTH_LOGGED_OUT` (exit 3) reports the endpoint; run `ask-gemini-web login` and sign in manually at Google in that same browser. There is no silent replacement with a fresh profile. An existing signed-in agent browser is reused through a **new tab**; existing tabs are never focused or navigated. Disconnect closes this session's tabs and leaves Chrome running. `login --no-wait` deliberately leaves its new tab open for manual sign-in. A dedicated `chrome-profile` browser is launched only when no CDP browser is reachable; a busy configured port uses a free loopback port, saved in `connection.json` with mode 0600. Credentials, cookies and profiles are never copied or exported. Follow the host's normal local-browser permission flow.
+
+The canonical command and runner are `ask-gemini-web` and `scripts/ask-gemini-web.mjs`. The deprecated `gemini-draft` command and runner still forward to them. Configuration uses `ask-gemini-web.config.json`; `gemini-draft.config.json` is read only when the new file is absent. Environment variables are `ASK_GEMINI_WEB_CDP`, `ASK_GEMINI_WEB_HOME`, and `ASK_GEMINI_WEB_CHROME` (runner runtime override: `ASK_GEMINI_WEB_APP`); corresponding `GEMINI_DRAFT_*` variables remain fallbacks only when the new variable is unset. Deprecated names emit notes on stderr, including with `--json`/`--compact`; stdout stays machine-readable.
+
+Home precedence is `--home` → new/legacy home environment variable → project `home` → existing project `.ask-gemini-web` → existing platform home → existing legacy project `.gemini-draft` or platform home → new platform default. Platform defaults are `~/.local/share/ask-gemini-web` or `%LOCALAPPDATA%\ask-gemini-web` (user home if LOCALAPPDATA is absent). Legacy homes use the same paths with `gemini-draft`. The selected home's `connection.json`, `chrome-profile`, and saved runs are reused in place; profiles are never copied or migrated. CDP precedence remains CLI → new/legacy environment → selected home's `connection.json` → project `cdp` → default.
