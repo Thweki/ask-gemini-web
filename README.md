@@ -24,7 +24,7 @@ Copy this request into your agent chat.
 
 > Install ask-gemini-web from https://github.com/thweki/ask-gemini-web and use my Gemini web account to write an article about urban gardens. Choose the model and thinking level for the task and ask me to sign in when needed.
 
-Your agent handles setup and execution. You sign in directly at Google inside a dedicated Chrome window. Login persists in a local profile across restarts, though Google may occasionally require verification. No API key is needed; standard Gemini web usage limits apply.
+Your agent handles setup and execution. You sign in directly at Google inside the selected Chrome browser. Login persists in a local profile across restarts, though Google may occasionally require verification. No API key is needed; standard Gemini web usage limits apply.
 
 ## For agents
 
@@ -61,3 +61,7 @@ Load references only as needed: [setup/API/recovery](skills/ask-gemini-web/refer
 Requires Node.js 22.12+, Chrome, and Gemini access. The installer provides independent runtimes for Codex and Agent Skills directories. Profiles and saved task records stay local and are excluded from release packages—never export passwords or cookies.
 
 Supports standard single-turn text and basic Markdown. Canvas, Deep Research workflows, binary uploads, and exact regeneration are outside this version. Verified on Windows, Chrome 157, and Chinese Gemini UI; other environments may need adapter updates. Licensed under [MIT](LICENSE).
+
+Browser discovery first probes the configured CDP address (`--cdp` → `GEMINI_DRAFT_CDP` → the selected home's `connection.json` → project `gemini-draft.config.json` `cdp`, default `http://127.0.0.1:9222`), then common local ports 9222 and 9333, then running Chrome/Chromium process hints and `DevToolsActivePort` files in known profile locations and the dedicated profile. Only local HTTP endpoints are accepted; duplicate and invalid discovered addresses are skipped. An unreachable configured endpoint allows discovery to continue.
+
+The first reachable browser is retained, including when signed out: `AUTH_LOGGED_OUT` (exit 3) reports the endpoint; run `gemini-draft login` and sign in manually at Google in that same browser. There is no silent replacement with a fresh profile. An existing signed-in agent browser is reused through a **new tab**; existing tabs are never focused or navigated. Disconnect closes this session's tabs and leaves Chrome running. `login --no-wait` deliberately leaves its new tab open for manual sign-in. A dedicated `chrome-profile` browser is launched only when no CDP browser is reachable; a busy configured port uses a free loopback port, saved in `connection.json` with mode 0600. Credentials, cookies and profiles are never copied or exported. Follow the host's normal local-browser permission flow.

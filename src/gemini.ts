@@ -1,6 +1,6 @@
 import type { Locator, Page } from 'playwright-core';
 import { DraftError } from './errors.js';
-import { isGemini, pause } from './browser.js';
+import { isGemini, pageEndpoint, pause } from './browser.js';
 import { effortId } from './routing.js';
 
 // Gemini has no public automation contract. Keep fallbacks here and fail closed on ambiguity.
@@ -96,7 +96,7 @@ export class Gemini {
 
   async requireLogin() {
     const auth = await this.waitForAuth();
-    if (auth.status !== 'logged_in') throw new DraftError(`AUTH_${auth.status.toUpperCase()}`, `${auth.reason}。运行 gemini-draft login。`, 3);
+    if (auth.status !== 'logged_in') throw new DraftError(`AUTH_${auth.status.toUpperCase()}`, `${auth.reason}。CDP：${pageEndpoint(this.page) || '当前连接'}。运行 gemini-draft login，或在同一浏览器完成登录。`, 3);
     return auth;
   }
 

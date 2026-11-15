@@ -1,10 +1,11 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chromium, type Browser, type BrowserContext } from 'playwright-core';
-import { readFile, mkdtemp, writeFile, readdir, rm } from 'node:fs/promises';
+import { readFile, mkdtemp, writeFile, readdir, rm, access } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { createServer } from 'node:net';
 import { createHash } from 'node:crypto';
 import { Gemini } from '../src/gemini.js';
 import { Connection, endpointReady, GEMINI } from '../src/browser.js';
@@ -132,18 +133,35 @@ test('thinking normalizes Standard/Extended and description labels, rejects unkn
 });
 
 test('successful CLI generation keeps stderr empty for compact/json/quiet modes', async t => {
+  let port: number | undefined;
+  for (const candidate of [9444, 9555]) {
+    const free = await new Promise<boolean>(resolve => {
+      const server = createServer();
+      server.once('error', () => resolve(false));
+      server.listen(candidate, '127.0.0.1', () => server.close(() => resolve(true)));
+    });
+    if (free) { port = candidate; break; }
+  }
+  if (!port) { t.skip('Isolated CDP ports 9444 and 9555 are unavailable.'); return; }
   const home = await mkdtemp(path.join(os.tmpdir(), 'gemini-cli-cdp-'));
   const ctx = await chromium.launchPersistentContext(path.join(home, 'test-profile'), {
-    channel: 'chrome', headless: true, args: ['--remote-debugging-port=0'],
+    channel: 'chrome', headless: true, args: [`--remote-debugging-port=${port}`, '--remote-debugging-address=127.0.0.1'],
   });
   try {
     await ctx.route('**/*', route => route.fulfill({ contentType: 'text/html', body: fixture }));
-    const port = (await readFile(path.join(home, 'test-profile', 'DevToolsActivePort'), 'utf8')).split('\n')[0];
     if (!await endpointReady(`http://127.0.0.1:${port}`)) {
       assert.ok(!process.env.CI, 'CI must allow the local HTTP CDP integration test.');
       t.skip('This sandbox blocks local HTTP CDP; run outside it to verify CLI transport.');
       return;
     }
+    const original = await page(ctx, 'https://gemini.google.com/app/original-agent-task');
+    const existingPages = ctx.pages();
+    const session = await ctx.newCDPSession(original);
+    let targetId: string;
+    try { targetId = (await session.send('Target.getTargetInfo')).targetInfo.targetId; }
+    finally { await session.detach(); }
+    const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json() as { id: string }[];
+    assert.ok(targets.some(target => target.id === targetId), 'CDP endpoint must belong to this throwaway Chrome.');
     const prompt = '请写一段青竹短文。';
     const job = path.join(home, 'job.json');
     await writeFile(job, JSON.stringify({ prompt }));
@@ -161,6 +179,27 @@ test('successful CLI generation keeps stderr empty for compact/json/quiet modes'
       assert.equal(result.state, 'complete');
       assert.equal(result.promptSha256, createHash('sha256').update(prompt).digest('hex'));
       if (flag === '--compact') assert.equal(stdout.trim().split('\n').length, 1);
+      assert.deepEqual(ctx.pages(), existingPages);
+      assert.equal(original.url(), 'https://gemini.google.com/app/original-agent-task');
+      assert.equal(await original.evaluate(() => (window as any).sendCount), 0);
+    }
+    const signedOut = fixture.replace('<button aria-label="Google Account">Account</button>', '<a href="https://accounts.google.com">Sign in</a>');
+    await ctx.route('**/*', route => route.fulfill({ contentType: 'text/html', body: signedOut }));
+    for (const command of [['ready'], ['auth', 'status'], ['doctor']]) {
+      const child = spawn(process.execPath, ['--import', 'tsx', 'src/cli.ts', '--json', '--home', home,
+        '--cdp', `http://127.0.0.1:${port}`, ...command], { windowsHide: true });
+      let stdout = '', stderr = '';
+      child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk; });
+      child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
+      const closed = new Promise(resolve => child.once('close', resolve));
+      const timer = setTimeout(() => child.kill(), 25000);
+      try { assert.equal(await closed, 3, stdout + stderr); } finally { clearTimeout(timer); }
+      const result = JSON.parse(stdout);
+      assert.equal(result.endpoint, `http://127.0.0.1:${port}`);
+      assert.equal(result.next, 'gemini-draft login');
+      assert.equal(stderr, '');
+      assert.deepEqual(ctx.pages(), existingPages);
+      await assert.rejects(access(path.join(home, 'chrome-profile')), { code: 'ENOENT' });
     }
   } finally { await ctx.close(); await rm(home, { recursive: true, force: true, maxRetries: 5 }); }
 });
