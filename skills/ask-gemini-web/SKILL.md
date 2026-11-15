@@ -1,9 +1,9 @@
 ---
-name: gemini-draft
-description: Use Gemini web for Q&A and drafting to conserve agent-plan quota, including users without regional Antigravity app access. Automatic model/thinking selection and persistent login; requires Gemini web access.
+name: ask-gemini-web
+description: Ask questions or draft text through the user's Gemini web account. Automatically select a model and thinking level and return the saved Markdown result.
 ---
 
-# Gemini Draft
+# Ask Gemini Web
 
 Offload Q&A and drafting to the user's Gemini web allowance to reduce work charged to the calling agent's plan. Also serve users whose region does not support the Antigravity app but who can use Gemini web. This uses Gemini web's own quota and eligibility; agent orchestration and result handling may still consume some agent quota.
 

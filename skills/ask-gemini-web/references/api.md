@@ -6,6 +6,8 @@ Needs Node.js 22.12+ and Chrome. In a source checkout, run `npm ci`, `npm run bu
 
 ## Call
 
+The skill was previously named `gemini-draft`. On a default-path upgrade, `--update` installs `ask-gemini-web` alongside the previous skill and reuses its connection settings. Existing CLI commands and saved job IDs still work.
+
 Q&A uses the same `prompt` input as drafting; even a short answer is saved as Markdown. The goal is to shift the main generation to Gemini web, not promise zero agent-plan usage. Antigravity app availability and Gemini web eligibility are separate checks: [Antigravity FAQ](https://antigravity.google/docs/faq), [Gemini web availability](https://support.google.com/gemini/answer/13575153?hl=en). No region list is hardcoded.
 
 `run <job.yaml>` or `run --stdin` (JSON); returns compact `{id,state,result,selection}`.

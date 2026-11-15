@@ -11,24 +11,28 @@ const args = process.argv.slice(2);
 const option = name => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
 const kind = option('--target') || 'both';
 const update = args.includes('--update');
-const source = path.join(root, 'skills', 'gemini-draft');
+const skillName = 'ask-gemini-web';
+const source = path.join(root, 'skills', skillName);
 const project = existsSync(path.join(root, 'gemini-draft.config.json'))
   ? JSON.parse(await readFile(path.join(root, 'gemini-draft.config.json'), 'utf8')) : {};
 const home = path.resolve(option('--home') || process.env.GEMINI_DRAFT_HOME || (project.home && path.resolve(root, project.home))
   || (process.platform === 'win32' ? path.join(process.env.LOCALAPPDATA || os.homedir(), 'gemini-draft') : path.join(os.homedir(), '.local/share/gemini-draft')));
 const saved = existsSync(path.join(home, 'connection.json')) ? JSON.parse(await readFile(path.join(home, 'connection.json'), 'utf8')) : {};
 const endpoint = option('--cdp') || process.env.GEMINI_DRAFT_CDP || saved.endpoint || project.cdp || 'http://127.0.0.1:9222';
-const targets = option('--destination') ? [path.resolve(option('--destination'))]
-  : kind === 'codex' ? [path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'skills/gemini-draft')]
-  : kind === 'agents' ? [path.join(os.homedir(), '.agents/skills/gemini-draft')]
-  : kind === 'both' ? [path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'skills/gemini-draft'), path.join(os.homedir(), '.agents/skills/gemini-draft')]
+const codexTarget = path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'skills', skillName);
+const agentsTarget = path.join(os.homedir(), '.agents/skills', skillName);
+const destination = option('--destination');
+const targets = destination ? [path.resolve(destination)]
+  : kind === 'codex' ? [codexTarget]
+  : kind === 'agents' ? [agentsTarget]
+  : kind === 'both' ? [codexTarget, agentsTarget]
   : (() => { throw new Error('--target must be codex, agents or both'); })();
 await access(path.join(root, 'dist/cli.js'));
 for (const target of targets) if (existsSync(target)) {
-  if (!update) throw new Error(`Destination exists; use --update only for a recognized gemini-draft installation: ${target}`);
+  if (!update) throw new Error(`Destination exists; use --update only for a recognized ${skillName} installation: ${target}`);
   const manifest = JSON.parse(await readFile(path.join(target, 'runtime/package.json'), 'utf8'));
   const instructions = await readFile(path.join(target, 'SKILL.md'), 'utf8');
-  if (manifest.name !== 'gemini-draft' || !/^name: gemini-draft$/m.test(instructions)) throw new Error(`Not a recognized gemini-draft installation: ${target}`);
+  if (manifest.name !== 'gemini-draft' || !/^name: (?:ask-gemini-web|gemini-draft)$/m.test(instructions)) throw new Error(`Not a recognized ${skillName} installation: ${target}`);
 }
 
 function installDependencies(directory) {
@@ -42,7 +46,9 @@ function installDependencies(directory) {
 }
 for (const target of targets) {
   await mkdir(path.dirname(target), { recursive: true });
-  const previous = update && existsSync(path.join(target, 'connection.json')) ? JSON.parse(await readFile(path.join(target, 'connection.json'), 'utf8')) : {};
+  const previousDirectory = !destination && !existsSync(target) ? path.join(path.dirname(target), 'gemini-draft') : target;
+  const previousConnection = path.join(previousDirectory, 'connection.json');
+  const previous = update && existsSync(previousConnection) ? JSON.parse(await readFile(previousConnection, 'utf8')) : {};
   await cp(source, target, { recursive: true, force: update, errorOnExist: !update });
   const runtime = path.join(target, 'runtime');
   await mkdir(runtime, { recursive: true });
