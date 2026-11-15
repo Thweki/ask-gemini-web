@@ -46,6 +46,7 @@
   });
   document.querySelector('[data-test-id="send-button"]').onclick = () => {
     window.sendCount++;
+    localStorage.setItem('totalSends', String(Number(localStorage.getItem('totalSends')) + 1));
     const prompt = document.querySelector('[contenteditable]').innerText;
     const query = document.createElement('user-query');
     const queryText = document.createElement('div');

@@ -1,5 +1,6 @@
 import { access, mkdir, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright-core';
 import { DraftError } from './errors.js';
@@ -43,7 +44,7 @@ export async function endpointReady(endpoint: string) {
   } catch { return false; }
 }
 
-export async function startChrome(config: Settings, executable?: string) {
+export async function startChrome(config: Settings, executable?: string, initialUrl = GEMINI) {
   const remember = async () => {
     await mkdir(config.home, { recursive: true, mode: 0o700 });
     await writeFile(path.join(config.home, 'connection.json'), JSON.stringify({ endpoint: config.endpoint }, null, 2) + '\n', { mode: 0o600 });
@@ -55,7 +56,7 @@ export async function startChrome(config: Settings, executable?: string) {
   const port = new URL(config.endpoint).port || '80';
   const child = spawn(chrome, [
     '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${port}`,
-    `--user-data-dir=${config.profile}`, '--no-first-run', '--no-default-browser-check', GEMINI,
+    `--user-data-dir=${config.profile}`, '--no-first-run', '--no-default-browser-check', initialUrl,
   ], { detached: true, stdio: 'ignore', windowsHide: true });
   let failure: Error | undefined;
   child.on('error', error => { failure = error; });
@@ -70,10 +71,14 @@ export async function startChrome(config: Settings, executable?: string) {
 }
 
 export class Connection {
+  private startupUrl?: string;
   private constructor(public browser: Browser, public context: BrowserContext) {}
   static async ensure(config: Settings) {
-    await startChrome(config);
-    return Connection.open(config);
+    const startupUrl = `about:blank#gemini-draft-${randomUUID()}`;
+    const { started } = await startChrome(config, undefined, startupUrl);
+    const connection = await Connection.open(config);
+    if (started) connection.startupUrl = startupUrl;
+    return connection;
   }
   static async open(config: Settings) {
     if (!await endpointReady(config.endpoint)) {
@@ -93,9 +98,14 @@ export class Connection {
       const existing = this.context.pages().filter(page => isGemini(page.url()));
       if (existing.length) { await existing.at(-1)!.bringToFront(); return existing.at(-1)!; }
     }
-    const page = await this.context.newPage();
+    return this.newTaskPage();
+  }
+  async newTaskPage(url = GEMINI): Promise<Page> {
+    const startup = this.context.pages().find(page => page.url() === this.startupUrl);
+    this.startupUrl = undefined;
+    const page = startup ?? await this.context.newPage();
     await page.bringToFront();
-    await page.goto(GEMINI, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
     return page;
   }
   async disconnect() {

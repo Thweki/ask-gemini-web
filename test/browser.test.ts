@@ -23,11 +23,11 @@ async function context(html = fixture) {
   await ctx.route('**/*', route => route.fulfill({ contentType: 'text/html', body: html }));
   return ctx;
 }
-async function page(ctx: BrowserContext) {
-  const page = await ctx.newPage(); await page.goto(GEMINI); return page;
+async function page(ctx: BrowserContext, url = GEMINI) {
+  const page = await ctx.newPage(); await page.goto(url); return page;
 }
 function factory(ctx: BrowserContext) {
-  return async () => ({ browser, context: ctx, page: () => page(ctx), disconnect: async () => {} }) as Connection;
+  return async () => ({ browser, context: ctx, newTaskPage: (url?: string) => page(ctx, url), disconnect: async () => {} }) as Connection;
 }
 
 test('auth requires account evidence, rejects anonymous composer, recognizes consent/challenge', async () => {
@@ -147,10 +147,12 @@ test('pre-click failure resumes the same job, including older SEND_UNAVAILABLE r
     const cfg = settings({ home });
     const store = new RunStore(cfg);
     const job = await compileJob({ prompt: '青竹' });
+    const userTab = await page(ctx);
     await assert.rejects(execute(cfg, job, () => {}, factory(ctx)), { code: 'SEND_UNAVAILABLE' });
     const [id] = await readdir(cfg.runs);
     assert.equal((await store.read(id)).state, 'prepared');
-    assert.equal(await ctx.pages()[0].evaluate(() => (window as any).sendCount), 0);
+    assert.equal(ctx.pages().length, 2);
+    assert.equal(await ctx.pages()[1].evaluate(() => (window as any).sendCount), 0);
     await ctx.unroute('**/*');
     await ctx.route('**/*', route => route.fulfill({ contentType: 'text/html', body: fixture }));
     const legacy = await store.create(job);
@@ -161,7 +163,8 @@ test('pre-click failure resumes the same job, including older SEND_UNAVAILABLE r
       const result = await resume(cfg, runId, () => {}, factory(ctx));
       assert.equal(result.state, 'complete');
       assert.equal(result.id, runId);
-      assert.equal(await ctx.pages().at(-1)!.evaluate(() => (window as any).sendCount), 1);
+      assert.deepEqual(ctx.pages(), [userTab]);
+      assert.equal(await userTab.evaluate(() => localStorage.getItem('totalSends')), runId === id ? '1' : '2');
     }
   } finally { await ctx.close(); await rm(home, { recursive: true, force: true }); }
 });
@@ -199,12 +202,14 @@ test('submission collects Markdown and completed resume never sends again', asyn
     const filename = path.join(home, 'job.yaml');
     await writeFile(filename, 'prompt: Write an article\nmodel: Test Reasoning');
     const config = settings({ home });
+    const userTab = await page(ctx, GEMINI + '/offline-conversation');
     const run = await execute(config, await loadJob(filename), () => {}, factory(ctx));
     assert.equal(run.state, 'complete');
     assert.match(await readFile(run.result!, 'utf8'), /# Fixture draft/);
     assert.equal(run.chosenModel?.name, 'Test Reasoning');
     assert.equal((await resume(config, run.id, () => {}, factory(ctx))).state, 'complete');
-    assert.equal(await ctx.pages()[0].evaluate(() => (window as any).sendCount), 1);
+    assert.deepEqual(ctx.pages(), [userTab]);
+    assert.equal(await userTab.evaluate(() => localStorage.getItem('totalSends')), '1');
   } finally { await ctx.close(); await rm(home, { recursive: true, force: true }); }
 });
 
@@ -216,16 +221,42 @@ test('lost click acknowledgement resumes original response without duplicate sub
     const filename = path.join(home, 'job.yaml');
     await writeFile(filename, 'prompt: Recover this article\nmodel: Test Fast');
     const config = settings({ home });
+    const userTab = await page(ctx, GEMINI + '/offline-conversation');
     Gemini.prototype.submit = async function (send) { await original.call(this, send); throw new Error('Simulated lost acknowledgement'); };
     await assert.rejects(execute(config, await loadJob(filename), () => {}, factory(ctx)), /Simulated lost acknowledgement/);
     Gemini.prototype.submit = original;
     const id = (await readdir(config.runs))[0];
     const store = new RunStore(config);
     assert.equal((await store.read(id)).state, 'submit_intent');
+    assert.equal(ctx.pages().length, 2);
     const result = await resume(config, id, () => {}, factory(ctx));
     assert.equal(result.state, 'complete');
-    assert.equal(await ctx.pages()[0].evaluate(() => (window as any).sendCount), 1);
+    assert.deepEqual(ctx.pages(), [userTab]);
+    assert.equal(await userTab.evaluate(() => localStorage.getItem('totalSends')), '1');
   } finally { Gemini.prototype.submit = original; await ctx.close(); await rm(home, { recursive: true, force: true }); }
+});
+
+test('resume opens and closes its own recovery tab when the original target is gone', async () => {
+  const ctx = await context();
+  const home = await mkdtemp(path.join(os.tmpdir(), 'gemini-reopen-'));
+  try {
+    const cfg = settings({ home });
+    const store = new RunStore(cfg);
+    const run = await store.create(await compileJob({ prompt: 'Recover saved conversation' }));
+    run.state = 'collecting';
+    run.targetId = 'closed';
+    run.conversationUrl = GEMINI + '/offline-conversation';
+    await store.save(run);
+    const savedChat = fixture.replace('<rich-textarea>',
+      '<user-query><div class="query-text">Recover saved conversation</div></user-query>'
+      + '<model-response><div class="markdown">Saved answer</div><button aria-label="Copy">Copy</button></model-response><rich-textarea>');
+    await ctx.route(run.conversationUrl, route => route.fulfill({ contentType: 'text/html', body: savedChat }));
+    const userTab = await page(ctx, run.conversationUrl);
+    const result = await resume(cfg, run.id, () => {}, factory(ctx));
+    assert.match(await readFile(result.result!, 'utf8'), /Saved answer/);
+    assert.deepEqual(ctx.pages(), [userTab]);
+    assert.equal(await userTab.evaluate(() => localStorage.getItem('totalSends')), null);
+  } finally { await ctx.close(); await rm(home, { recursive: true, force: true }); }
 });
 
 test('ambiguous submission with no original page cannot resend', async () => {

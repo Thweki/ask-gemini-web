@@ -4,7 +4,7 @@ import path from 'node:path';
 import { parse } from 'yaml';
 import { jobSchema, type Settings } from './config.js';
 import { DraftError, errorInfo } from './errors.js';
-import { Connection, isGemini, pause, shutdown } from './browser.js';
+import { Connection, GEMINI, isGemini, pause, shutdown } from './browser.js';
 import { Gemini, type Model, type ThinkingOption } from './gemini.js';
 import { selectForTask, selectionSummary, type Selection } from './selection.js';
 import type { Task } from './routing.js';
@@ -145,6 +145,13 @@ function conversation(url: string) {
   return /^\/app\/[a-zA-Z0-9_-]+$/.test(new URL(url).pathname) ? url : undefined;
 }
 
+async function findTaskPage(connection: Connection, id?: string, url?: string) {
+  if (!id) return;
+  for (const page of connection.context.pages()) {
+    if (isGemini(page.url()) && (!url || page.url() === url) && await targetId(connection, page) === id) return page;
+  }
+}
+
 async function checkOutput(output?: string) {
   if (!output) return;
   let exists = false;
@@ -155,7 +162,9 @@ async function checkOutput(output?: string) {
 
 async function submit(connection: Connection, store: RunStore, run: Run, prompt: string, notify: (message: string) => void) {
   await checkOutput(run.output);
-  const page = await connection.page(true);
+  const previous = await findTaskPage(connection, run.targetId, GEMINI);
+  const page = previous ?? await connection.newTaskPage();
+  if (previous) await previous.reload({ waitUntil: 'domcontentloaded' });
   const gemini = new Gemini(page);
   run.targetId = await targetId(connection, page);
   await store.save(run);
@@ -252,14 +261,11 @@ async function work(config: Settings, store: RunStore, run: Run, notify: (messag
     }
     if (run.state === 'prepared') gemini = await submit(connection, store, run, prompt, notify);
     else {
-      let page: Page | undefined;
-      for (const candidate of connection.context.pages()) {
-        if (isGemini(candidate.url()) && await targetId(connection, candidate) === run.targetId
-          && (!run.conversationUrl || candidate.url() === run.conversationUrl)) { page = candidate; break; }
-      }
+      let page = await findTaskPage(connection, run.targetId, run.conversationUrl);
       if (!page && run.conversationUrl && conversation(run.conversationUrl)) {
-        page = await connection.context.newPage();
-        await page.goto(run.conversationUrl, { waitUntil: 'domcontentloaded' });
+        page = await connection.newTaskPage(run.conversationUrl);
+        run.targetId = await targetId(connection, page);
+        await store.save(run);
       }
       if (!page) throw new DraftError('SUBMISSION_UNCERTAIN', '无法找到原任务标签页或对话地址。请手动检查 Chrome；为避免重复提交，本工具不会重新发送。');
       gemini = new Gemini(page);
@@ -276,7 +282,10 @@ async function work(config: Settings, store: RunStore, run: Run, notify: (messag
         throw new DraftError('SUBMISSION_UNCERTAIN', '原对话未显示唯一匹配的提示词。请手动检查；不会重新发送。');
       }
     }
-    return await collect(gemini, store, run, prompt);
+    const result = await collect(gemini, store, run, prompt);
+    try { await gemini.page.close(); }
+    catch (error) { notify(`任务结果已保存，关闭任务标签页失败：${errorInfo(error).message}`); }
+    return result;
   } catch (error) {
     run.lastError = errorInfo(error);
     await store.save(run);
