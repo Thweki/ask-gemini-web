@@ -1,0 +1,4 @@
+prompt: |
+  请写一篇约 150 字的中文短文，主题是“为灵感留一个位置”。
+  输出一个 Markdown 一级标题和两段正文，最后独立一行写 AUTO_ROUTING_OK。
+timeoutSeconds: 180

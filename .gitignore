@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.env*
+!.env.example
+.gemini-draft/
+chrome-profile/
+playwright/.auth/
+runs/
+outputs/
+*.log
+npm-shrinkwrap.json
+releases/
+.package-smoke/
+acceptance-results/

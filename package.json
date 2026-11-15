@@ -1,0 +1,35 @@
+{
+  "name": "gemini-draft",
+  "version": "0.2.1",
+  "private": true,
+  "description": "Deterministic Gemini web drafting CLI over local Chrome CDP",
+  "type": "module",
+  "exports": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "license": "MIT",
+  "bin": { "gemini-draft": "dist/cli.js" },
+  "engines": { "node": ">=22.12" },
+  "scripts": {
+    "dev": "tsx src/cli.ts",
+    "build": "tsc",
+    "check": "tsc --noEmit && tsc -p tsconfig.test.json",
+    "test": "tsx --test test/*.test.ts",
+    "install:skill": "node scripts/install-skill.mjs",
+    "prepack": "npm run build && node scripts/prepare-package.mjs"
+  },
+  "files": ["dist", "skills", "scripts/install-skill.mjs", "README.md", "README.zh-CN.md", "LICENSE", "ACCEPTANCE.md", "examples", "npm-shrinkwrap.json"],
+  "dependencies": {
+    "@mixmark-io/domino": "2.2.0",
+    "commander": "15.1.0",
+    "playwright-core": "1.65.1",
+    "turndown": "7.2.5",
+    "yaml": "2.9.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/turndown": "^5.0.5",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}

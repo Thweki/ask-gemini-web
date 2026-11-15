@@ -1,0 +1,7 @@
+prompt: |
+  这是 gemini-draft CLI 的真实写稿验收。
+  请输出一篇约 180 字的中文短文，标题为“把灵感保存下来”。
+  使用 Markdown：一个一级标题、两段正文，最后单独一行写 ACCEPTANCE_OK。
+  不要解释任务，也不要提及本次验收。
+model: 快速解答
+timeoutSeconds: 180

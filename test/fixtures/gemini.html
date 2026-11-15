@@ -1,0 +1,63 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Offline Gemini adapter fixture</title>
+<button aria-label="Google Account">Account</button>
+<button data-test-id="bard-mode-menu-button" aria-controls="model-menu" aria-expanded="false">Test Fast</button>
+<div role="menu" id="model-menu" hidden>
+  <button role="menuitemradio" aria-checked="true"><span>Test Fast</span><br><span>Fast drafting</span></button>
+  <button role="menuitemradio" aria-checked="false"><span>Test Reasoning</span><br><span>Careful drafting</span></button>
+  <button role="menuitemradio" aria-checked="false" aria-disabled="true"><span>Test Premium</span><br><span>Upgrade to unlock</span></button>
+  <button role="menuitem" aria-haspopup="true" aria-expanded="false" aria-controls="thinking-menu">Thinking level</button>
+</div>
+<div role="menu" id="thinking-menu" hidden>
+  <button role="menuitemradio" aria-checked="false"><span>Low</span><br>Fast</button>
+  <button role="menuitemradio" aria-checked="true"><span>Medium</span><br>Balanced</button>
+  <button role="menuitemradio" aria-checked="false"><span>High</span><br>Detailed</button>
+</div>
+<rich-textarea><div class="ql-editor" contenteditable="true" role="textbox"></div></rich-textarea>
+<button data-test-id="send-button">Send</button>
+<script>
+  window.sendCount = 0;
+  const trigger = document.querySelector('[data-test-id="bard-mode-menu-button"]');
+  const menu = document.querySelector('#model-menu');
+  const thinking = document.querySelector('#thinking-menu');
+  const submenu = menu.querySelector('[aria-haspopup]');
+  trigger.onclick = () => { menu.hidden = !menu.hidden; trigger.setAttribute('aria-expanded', String(!menu.hidden)); };
+  document.addEventListener('keydown', event => { if (event.key === 'Escape') {
+    thinking.hidden = true; menu.hidden = true;
+    trigger.setAttribute('aria-expanded', 'false'); submenu.setAttribute('aria-expanded', 'false');
+  } });
+  submenu.onmouseenter = () => { thinking.hidden = false; submenu.setAttribute('aria-expanded', 'true'); };
+  menu.querySelectorAll('[role="menuitemradio"]').forEach(button => {
+    button.onclick = () => {
+      if (button.getAttribute('aria-disabled') === 'true') return;
+      menu.querySelectorAll('button').forEach(option => option.setAttribute('aria-checked', String(option === button)));
+      trigger.textContent = button.querySelector('span').textContent;
+      menu.hidden = true;
+      trigger.setAttribute('aria-expanded', 'false');
+    };
+  });
+  thinking.querySelectorAll('button').forEach(button => {
+    button.onclick = () => {
+      thinking.querySelectorAll('button').forEach(option => option.setAttribute('aria-checked', String(option === button)));
+      thinking.hidden = true; menu.hidden = true;
+      trigger.setAttribute('aria-expanded', 'false'); submenu.setAttribute('aria-expanded', 'false');
+    };
+  });
+  document.querySelector('[data-test-id="send-button"]').onclick = () => {
+    window.sendCount++;
+    const prompt = document.querySelector('[contenteditable]').innerText;
+    const query = document.createElement('user-query');
+    const queryText = document.createElement('div');
+    queryText.className = 'query-text';
+    const summary = document.createElement('h5'); summary.className = 'cdk-visually-hidden screen-reader-user-query-label';
+    summary.textContent = 'You said ' + prompt.slice(0, 20) + '…'; queryText.append(summary);
+    prompt.split('\n').forEach(line => { const p = document.createElement('p'); p.className = 'query-text-line'; p.textContent = line; queryText.append(p); });
+    query.append(queryText); document.body.append(query);
+    history.pushState({}, '', '/app/offline-conversation');
+    if (window.withholdResponse) return;
+    const response = document.createElement('model-response');
+    response.innerHTML = '<div class="markdown"><h1>Fixture draft</h1><p>Complete output.</p></div><button aria-label="Copy">Copy</button>';
+    document.body.append(response);
+  };
+</script>
