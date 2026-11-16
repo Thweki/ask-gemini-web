@@ -517,10 +517,12 @@ test('export failure after generation leaves a collected result for browser-free
   const ctx = await context();
   const home = await mkdtemp(path.join(os.tmpdir(), 'gemini-export-race-'));
   const original = Gemini.prototype.submit;
+  let submitCount = 0;
   try {
     const cfg = settings({ home });
     const output = path.join(home, 'draft.md');
     Gemini.prototype.submit = async function (send) {
+      submitCount++;
       await original.call(this, send);
       await writeFile(output, 'Concurrent user file');
     };
@@ -530,11 +532,12 @@ test('export failure after generation leaves a collected result for browser-free
     assert.equal(saved.state, 'collected');
     assert.match(await readFile(saved.result!, 'utf8'), /Fixture draft/);
     assert.equal(await readFile(output, 'utf8'), 'Concurrent user file');
+    assert.deepEqual(ctx.pages(), []);
     await rm(output);
     const noBrowser = async (): Promise<never> => { throw new Error('Must not reconnect'); };
     assert.equal((await resume(cfg, id, () => {}, noBrowser)).state, 'complete');
     assert.match(await readFile(output, 'utf8'), /Fixture draft/);
-    assert.equal(await ctx.pages()[0].evaluate(() => (window as any).sendCount), 1);
+    assert.equal(submitCount, 1);
   } finally { Gemini.prototype.submit = original; await ctx.close(); await rm(home, { recursive: true, force: true, maxRetries: 5 }); }
 });
 
@@ -659,4 +662,33 @@ test('combined picker rejects ambiguous menus and never falls back from invalid 
     await assert.rejects(gemini.models(), { code: 'MODEL_MENU_UNKNOWN' });
     assert.equal(await p.evaluate(() => (window as any).sendCount), 0);
   } finally { await ctx.close(); }
+});
+
+
+test('resume closes the restored task tab after saving collection even if export fails', async () => {
+  const ctx = await context();
+  const home = await mkdtemp(path.join(os.tmpdir(), 'gemini-restored-export-'));
+  try {
+    const cfg = settings({ home });
+    const output = path.join(home, 'draft.md');
+    const store = new RunStore(cfg);
+    const run = await store.create(await compileJob({ prompt: 'Original task', output }));
+    const restored = await page(ctx);
+    await new Gemini(restored).fill('Original task');
+    await new Gemini(restored).submit(await new Gemini(restored).sendButton());
+    run.state = 'submitted'; run.conversationUrl = restored.url();
+    const session = await ctx.newCDPSession(restored);
+    try { run.targetId = (await session.send('Target.getTargetInfo')).targetInfo.targetId; }
+    finally { await session.detach(); }
+    await store.save(run);
+    const userTab = await page(ctx, GEMINI + '/user-tab');
+    await writeFile(output, 'User-owned output');
+    await assert.rejects(resume(cfg, run.id, () => {}, factory(ctx)), { code: 'OUTPUT_EXISTS' });
+    const saved = await store.read(run.id);
+    assert.equal(saved.state, 'collected');
+    assert.match(await readFile(saved.result!, 'utf8'), /Fixture draft/);
+    assert.equal(await readFile(output, 'utf8'), 'User-owned output');
+    assert.equal(restored.isClosed(), true);
+    assert.deepEqual(ctx.pages(), [userTab]);
+  } finally { await ctx.close(); await rm(home, { recursive: true, force: true, maxRetries: 5 }); }
 });

@@ -1,10 +1,10 @@
 import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, writeFile, stat, rm, access } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, stat, rm, access, symlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright-core';
-import { chromeProcessHints, Connection, devToolsEndpoint, discoverEndpoint, endpointReady, launchChrome, startChrome, processHints } from '../src/browser.js';
+import { chromeProcessHints, Connection, devToolsEndpoint, discoverEndpoint, endpointReady, launchChrome, startChrome, processHints, parseChromeCmdline, listeningChromeEndpoints } from '../src/browser.js';
 import { Gemini } from '../src/gemini.js';
 import type { Settings } from '../src/config.js';
 
@@ -13,6 +13,7 @@ async function temporary(action: (config: Settings) => Promise<void>) {
   try { await action({ home, profile: path.join(home, 'chrome-profile'), runs: path.join(home, 'runs'), endpoint: 'http://127.0.0.1:9555', endpointSource: 'default' }); }
   finally { await rm(home, { recursive: true, force: true }); }
 }
+const noListening = async () => [];
 const noProcesses = async () => ({ profiles: [], endpoints: [] });
 
 test('discovery probes configured endpoint, common ports, process hints and DevTools files in order', async () => temporary(async cfg => {
@@ -21,7 +22,7 @@ test('discovery probes configured endpoint, common ports, process hints and DevT
   await writeFile(path.join(profile, 'DevToolsActivePort'), '9444\n/devtools/browser/test\n');
   const tried: string[] = [];
   const ready = async (endpoint: string) => { tried.push(endpoint); return endpoint.endsWith(':9444'); };
-  assert.equal(await discoverEndpoint(cfg, { ready, profiles: [profile], processes: async () => ({ profiles: [], endpoints: ['http://127.0.0.1:9666'] }) }), 'http://127.0.0.1:9444');
+  assert.equal(await discoverEndpoint(cfg, { ready, listening: noListening, profiles: [profile], processes: async () => ({ profiles: [], endpoints: ['http://127.0.0.1:9666'] }) }), 'http://127.0.0.1:9444');
   assert.deepEqual(tried, [9555, 9222, 9333, 9666, 9444].map(port => `http://127.0.0.1:${port}`));
   tried.length = 0;
   assert.equal(await discoverEndpoint({ ...cfg, endpoint: 'http://127.0.0.1:9222' }, {
@@ -34,7 +35,7 @@ test('invalid/nonlocal candidates never reach the probe; missing and garbage Dev
   await writeFile(path.join(cfg.home, 'DevToolsActivePort'), 'http://example.com:9444\n');
   const tried: string[] = [];
   assert.equal(await discoverEndpoint({ ...cfg, endpoint: 'http://example.com:9222' }, {
-    ready: async endpoint => { tried.push(endpoint); return false; }, commonPorts: [], profiles: [cfg.home, cfg.profile],
+    ready: async endpoint => { tried.push(endpoint); return false; }, listening: noListening, commonPorts: [], profiles: [cfg.home, cfg.profile],
     processes: async () => ({ profiles: [], endpoints: ['http://user:pass@localhost:9444', 'http://example.com:9444'] }),
   }), undefined);
   assert.deepEqual(tried, []);
@@ -221,3 +222,61 @@ test('busy launch port selects a free loopback port; unrelated binding errors ar
     throw Object.assign(new Error('denied'), { code: 'EPERM' });
   }), { code: 'EPERM' });
 });
+
+
+test('Linux cmdline parser accepts rewritten argv, classic argv and quoted executable/profile paths', async () => {
+  const real = (await readFile(new URL('./fixtures/chrome-linux-cmdline.txt', import.meta.url), 'utf8')).trim();
+  assert.deepEqual(chromeProcessHints([parseChromeCmdline(real + '\0')]), {
+    profiles: ['/home/box/chrome-profile/Fork-6'], endpoints: ['http://127.0.0.1:9228'],
+  });
+  const args = ['/opt/google/chrome/chrome', '--user-data-dir', '/tmp/Profile With Spaces',
+    '--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE localhost', '--remote-debugging-port=9444', '--remote-debugging-address=127.0.0.1'];
+  assert.deepEqual(parseChromeCmdline(args.join('\0') + '\0'), args);
+  assert.deepEqual(chromeProcessHints([parseChromeCmdline(args.join('\0'))]), {
+    profiles: ['/tmp/Profile With Spaces'], endpoints: ['http://127.0.0.1:9444'],
+  });
+  for (const quote of ['"', "'"]) {
+    const line = `${quote}/opt/Chrome Test/chrome${quote} --proxy-bypass-list=<-loopback>;localhost --host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE localhost --user-data-dir=${quote}/tmp/Profile With Spaces${quote} --remote-debugging-port 9555 --remote-debugging-address ::1`;
+    assert.deepEqual(chromeProcessHints([parseChromeCmdline(line + '\0')]), {
+      profiles: ['/tmp/Profile With Spaces'], endpoints: ['http://[::1]:9555'],
+    });
+  }
+});
+
+test('pure /proc listener discovery accepts only loopback TCP listeners owned by Chrome', async () => temporary(async cfg => {
+  const proc = path.join(cfg.home, 'proc');
+  for (const [pid, name, inodes] of [['101', 'chrome', ['11', '12', '13', '14', '15']], ['102', 'node', ['16']]] as const) {
+    const directory = path.join(proc, pid, 'fd');
+    await mkdir(directory, { recursive: true });
+    await writeFile(path.join(proc, pid, 'comm'), name + '\n');
+    for (const inode of inodes) await symlink(`socket:[${inode}]`, path.join(directory, inode));
+  }
+  await mkdir(path.join(proc, 'net'));
+  const row = (address: string, port: number, inode: string, state = '0A') =>
+    `0: ${address}:${port.toString(16).toUpperCase().padStart(4, '0')} 00000000:0000 ${state} 0:0 0:0 0 1000 0 ${inode}`;
+  const loopback = os.endianness() === 'LE' ? '0100007F' : '7F000001';
+  const ipv6 = os.endianness() === 'LE' ? '00000000000000000000000001000000' : '00000000000000000000000000000001';
+  await writeFile(path.join(proc, 'net/tcp'), ['header', row(loopback, 9444, '11'), row('00000000', 9555, '12'),
+    row('0200000A', 9666, '13'), row(loopback, 9777, '14', '01'), row(loopback, 9888, '16')].join('\n'));
+  await writeFile(path.join(proc, 'net/tcp6'), ['header', row(ipv6, 9999, '15'), row('00000000000000000000000000000000', 9222, '12')].join('\n'));
+  assert.deepEqual(await listeningChromeEndpoints('linux', proc), ['http://127.0.0.1:9444', 'http://[::1]:9999']);
+  assert.deepEqual(await listeningChromeEndpoints('linux', path.join(proc, 'missing')), []);
+  assert.deepEqual(await listeningChromeEndpoints('darwin', proc), []);
+}));
+
+test('listener fallback follows process hints, skips tried ports and remote endpoints, and precedes launch', async () => temporary(async cfg => {
+  const tried: string[] = [];
+  const discover = () => discoverEndpoint(cfg, {
+    ready: async endpoint => { tried.push(endpoint); return endpoint.endsWith(':9444'); }, profiles: [],
+    processes: async () => ({ profiles: [], endpoints: ['http://127.0.0.1:9666'] }),
+    listening: async () => {
+      assert.deepEqual(tried, [9555, 9222, 9333, 9666].map(port => `http://127.0.0.1:${port}`));
+      return ['http://localhost:9222', 'http://127.0.0.1:9333', 'http://localhost:9666', 'http://remote.example:9777', 'http://127.0.0.1:9444'];
+    },
+  });
+  const result = await startChrome(cfg, undefined, undefined, {
+    ready: endpointReady, discover, launch: async () => { assert.fail('Ready listening endpoint must prevent launch'); },
+  });
+  assert.deepEqual(result, { started: false, endpoint: 'http://127.0.0.1:9444' });
+  assert.deepEqual(tried, [9555, 9222, 9333, 9666, 9444].map(port => `http://127.0.0.1:${port}`));
+}));

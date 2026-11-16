@@ -264,7 +264,7 @@ async function collect(gemini: Gemini, store: RunStore, run: Run, prompt: string
       // Persist collection separately so failed exports resume locally without generating again.
       run.state = 'collected'; run.result = path.join(directory, 'draft.md'); run.lastError = undefined;
       await store.save(run);
-      return await finish(store, run);
+      return run;
     }
     if (run.state !== 'collecting') { run.state = 'collecting'; await store.save(run); }
     await pause(750);
@@ -328,11 +328,11 @@ async function work(config: Settings, store: RunStore, run: Run, notify: (messag
         throw new DraftError('SUBMISSION_UNCERTAIN', '原对话未显示唯一匹配的提示词。请手动检查；不会重新发送。');
       }
     }
-    const result = await collect(gemini, store, run, prompt);
+    await collect(gemini, store, run, prompt);
     completed = true;
     try { await gemini.page.close(); }
     catch (error) { notify(`任务结果已保存，关闭任务标签页失败：${errorInfo(error).message}`); }
-    return result;
+    return await finish(store, run);
   } catch (error) {
     run.lastError = errorInfo(error);
     await store.save(run);

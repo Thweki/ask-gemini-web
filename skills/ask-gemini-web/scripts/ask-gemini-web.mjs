@@ -21,6 +21,7 @@ if (!existsSync(entry)) {
   const args = [entry];
   if (connection.home) args.push('--home', connection.home);
   if (connection.explicitCdp === true && connection.endpoint) args.push('--cdp', connection.endpoint);
+  else if (connection.endpoint) args.push('--remembered-cdp', connection.endpoint);
   args.push('--json', '--compact', ...process.argv.slice(2));
   const child = spawn(process.execPath, args, { stdio: 'inherit', windowsHide: true });
   child.on('error', error => { console.error(error.message); process.exitCode = 1; });

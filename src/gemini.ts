@@ -1,6 +1,6 @@
 import type { Locator, Page } from 'playwright-core';
 import { DraftError } from './errors.js';
-import { isGemini, pageEndpoint, pause } from './browser.js';
+import { isGemini, pageEndpoint, pause, setPageAuthBlocked } from './browser.js';
 import { effortId } from './routing.js';
 
 // Gemini has no public automation contract. Keep fallbacks here and fail closed on ambiguity.
@@ -19,7 +19,7 @@ export const selectors = {
   errors: '[role="alert"]:visible, .error-message:visible, .response-error:visible',
 };
 
-export type AuthStatus = 'logged_in' | 'logged_out' | 'challenge' | 'consent_required' | 'restricted' | 'unknown';
+export type AuthStatus = 'logged_in' | 'logged_out' | 'challenge' | 'consent_required' | 'restricted' | 'blocked_sorry' | 'unknown';
 export type Auth = { status: AuthStatus; reason: string; url: string };
 export type Model = { id: string; name: string; mode?: string; description: string; availability: 'available' | 'unavailable'; selected: boolean; reason?: string };
 export type ThinkingOption = Model;
@@ -62,12 +62,25 @@ export class Gemini {
   constructor(public page: Page) { page.setDefaultTimeout(8000); }
 
   async auth(): Promise<Auth> {
+    setPageAuthBlocked(this.page, false);
     const originalUrl = this.page.url();
     let parsed: URL;
     try { parsed = new URL(originalUrl); } catch { return { status: 'unknown', reason: '页面尚未就绪', url: 'about:blank' }; }
     // Login URLs can carry account hints and redirect tokens in their query string.
     const url = parsed.origin + parsed.pathname;
     const result = (status: AuthStatus, reason: string): Auth => ({ status, reason, url });
+    if (parsed.hostname === 'google.com' || parsed.hostname.endsWith('.google.com')) {
+      const sorryUrl = /^(?:www\.)?google\.com$/.test(parsed.hostname) && /^\/sorry(?:\/|$)/.test(parsed.pathname);
+      const text = sorryUrl ? '' : await this.page.locator('body').evaluate(element => {
+        const body = element.cloneNode(true) as Element;
+        body.querySelectorAll('model-response, user-query, script, style').forEach(node => node.remove());
+        return body.textContent || '';
+      });
+      if (sorryUrl || /unusual traffic|可疑流量|异常流量|異常流量/i.test(text)) {
+        setPageAuthBlocked(this.page, true);
+        return result('blocked_sorry', 'Google 检测到异常流量，请在该浏览器手动完成验证，或使用已经登录的浏览器；本工具不会处理验证码');
+      }
+    }
     if (parsed.origin === 'https://accounts.google.com') {
       return /challenge|recovery|signin\/v2\/challenge/i.test(parsed.pathname)
         ? result('challenge', '请在 Google 页面手动完成验证')

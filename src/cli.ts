@@ -22,6 +22,7 @@ if (/^gemini-draft(?:\.(?:mjs|js|cmd|exe))?$/.test(path.basename(process.argv[1]
 program.name('ask-gemini-web').version('0.2.1')
   .description('通过本机 Chrome CDP 复现 Gemini 网页写稿流程；运行时不调用额外模型 API。')
   .option('--cdp <url>', '本机 Chrome CDP 地址（默认使用保存的配置）')
+  .option('--remembered-cdp <url>', '安装保存的隐式 CDP 候选，不可达时继续发现')
   .option('--home <path>', '专用配置与任务数据目录')
   .option('--compact', '单行 JSON，适合 agent 调用')
   .option('--quiet', '隐藏进度信息（仍报告错误）')
@@ -33,7 +34,8 @@ const info = (message: string) => { if (!machineOutput() && !program.opts().quie
 function report(data: unknown) { console.log(JSON.stringify(data, null, program.opts().compact ? undefined : 2)); }
 async function connected<T>(action: (connection: Connection) => Promise<T>) {
   const connection = await Connection.ensure(config());
-  try { return await action(connection); } finally { await connection.disconnect(); }
+  try { return await action(connection); }
+  finally { await connection.disconnect(); }
 }
 async function locked<T>(action: () => Promise<T>) { return new RunStore(config()).lock(action); }
 function seconds(value: string) {
@@ -88,6 +90,7 @@ program.command('login').description('复用或启动 Chrome，由用户在 Goog
       let previous = '';
       while (Date.now() < deadline) {
         const auth = await gemini.auth();
+        if (auth.status === 'blocked_sorry') await gemini.requireLogin();
         if (auth.status === 'logged_in') { loggedIn = true; report(auth); return; }
         if (auth.status !== previous) { info(`${auth.status}：${auth.reason}`); previous = auth.status; }
         await pause(1000);

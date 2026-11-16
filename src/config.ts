@@ -15,7 +15,7 @@ export function localEndpoint(input: string): string {
   return url.origin;
 }
 
-export function settings(options: { cdp?: string; home?: string }, directory = process.cwd()) {
+export function settings(options: { cdp?: string; rememberedCdp?: string; home?: string }, directory = process.cwd()) {
   const newProjectFile = path.resolve(directory, 'ask-gemini-web.config.json');
   const oldProjectFile = path.resolve(directory, 'gemini-draft.config.json');
   const projectFile = existsSync(newProjectFile) ? newProjectFile : oldProjectFile;
@@ -36,12 +36,12 @@ export function settings(options: { cdp?: string; home?: string }, directory = p
   }
   const environmentCdp = options.cdp ? undefined : environment('CDP');
   const endpointSource: 'cli' | 'environment' | 'remembered' | 'project' | 'default' = options.cdp ? 'cli' : environmentCdp ? 'environment'
-    : remembered.endpoint ? 'remembered' : project.cdp ? 'project' : 'default';
+    : options.rememberedCdp || remembered.endpoint ? 'remembered' : project.cdp ? 'project' : 'default';
   return {
     home,
     profile: path.join(home, 'chrome-profile'),
     runs: path.join(home, 'runs'),
-    endpoint: localEndpoint(options.cdp || environmentCdp || remembered.endpoint || project.cdp || 'http://127.0.0.1:9222'),
+    endpoint: localEndpoint(options.cdp || environmentCdp || options.rememberedCdp || remembered.endpoint || project.cdp || 'http://127.0.0.1:9222'),
     endpointSource,
   };
 }
