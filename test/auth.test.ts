@@ -8,13 +8,14 @@ import { domPage } from './support/dom-page.js';
 
 const sorry = await readFile(new URL('./fixtures/google-sorry.html', import.meta.url), 'utf8');
 
-test('sorry URL or unusual-traffic copy has a distinct auth error without waiting or interacting', async () => {
+test('sorry URL or verification elements on non-Gemini Google hosts have a distinct auth error', async () => {
   for (const [url, html] of [
     ['https://www.google.com/sorry/index?continue=private#token', '<body>Verification required</body>'],
     ['https://google.com/sorry', sorry],
-    ['https://gemini.google.com/app', sorry],
-    ['https://accounts.google.com/signin', '<body>可疑流量</body>'],
-    ['https://gemini.google.com/app', '<body>异常流量</body>'],
+    ['https://accounts.google.com/signin', '<form id="captcha-form"></form>'],
+    ['https://www.google.com/search', '<div id="captcha-form"></div>'],
+    ['https://accounts.google.com/signin', '<form action="/sorry/index"></form>'],
+    ['https://www.google.com/search', '<iframe src="https://www.google.com/recaptcha/api2/anchor"></iframe>'],
   ]) {
     const { page } = domPage(html);
     page.url = () => url;
@@ -28,6 +29,78 @@ test('sorry URL or unusual-traffic copy has a distinct auth error without waitin
       assert.match((error as Error).message, /该浏览器手动完成验证.*已经登录的浏览器/);
       return true;
     });
+  }
+});
+
+const loggedIn = '<button aria-label="Google Account">Account</button><textarea aria-label="Prompt"></textarea>';
+
+test('traffic text alone never reports a sorry block on Google hosts', async () => {
+  for (const [url, html, status] of [
+    ['https://gemini.google.com/app', sorry, 'unknown'],
+    ['https://gemini.google.com/app', '<body>异常流量</body>', 'unknown'],
+    ['https://accounts.google.com/signin', '<body>可疑流量</body>', 'logged_out'],
+    ['https://www.google.com/search', '<body>unusual traffic</body>', 'unknown'],
+    ['https://google.com/sorry-not-a-page', '<body>異常流量</body>', 'unknown'],
+  ]) {
+    const { page } = domPage(html);
+    page.url = () => url;
+    const gemini = new Gemini(page);
+    assert.equal((await gemini.auth()).status, status);
+    // Avoid the normal unknown-page loading wait while checking the real auth path.
+    const waitForAuth = gemini.waitForAuth.bind(gemini);
+    gemini.waitForAuth = () => waitForAuth(0);
+    await assert.rejects(gemini.requireLogin(), { code: `AUTH_${status.toUpperCase()}` });
+  }
+});
+
+test('Gemini traffic phrases in sidebar, title, composer or hidden content remain logged in during collection', async () => {
+  for (const phrase of ['unusual traffic', '异常流量', '可疑流量', '異常流量']) {
+    for (const markup of [
+      `<nav><a>${phrase}</a></nav>`, `<h1>${phrase}</h1>`,
+      `<textarea aria-label="Draft">${phrase}</textarea>`, `<div hidden>${phrase}</div>`,
+    ]) {
+      // Use the content's textarea as the single composer when testing input text.
+      const { page, document } = domPage(loggedIn + markup);
+      if (markup.startsWith('<textarea')) document.querySelector('[aria-label="Prompt"]')!.remove();
+      page.url = () => 'https://gemini.google.com/app';
+      const gemini = new Gemini(page);
+      assert.equal((await gemini.auth()).status, 'logged_in');
+      assert.equal((await gemini.requireLogin()).status, 'logged_in');
+      // Collection rechecks auth on the same page after the response starts.
+      const response = document.createElement('model-response');
+      response.textContent = phrase;
+      document.body.appendChild(response);
+      assert.equal((await gemini.auth()).status, 'logged_in');
+      assert.equal((await gemini.requireLogin()).status, 'logged_in');
+    }
+  }
+});
+
+test('traffic phrases introduced after submission do not interrupt collection auth checks', async () => {
+  const { page, document } = domPage(loggedIn);
+  page.url = () => 'https://gemini.google.com/app';
+  const gemini = new Gemini(page);
+  await gemini.requireLogin();
+  for (const phrase of ['unusual traffic', '异常流量', '可疑流量', '異常流量']) {
+    document.querySelector('textarea')!.textContent = phrase;
+    const title = document.createElement('h1');
+    title.textContent = phrase;
+    document.body.appendChild(title);
+    assert.equal((await gemini.auth()).status, 'logged_in');
+    assert.equal((await gemini.requireLogin()).status, 'logged_in');
+  }
+});
+
+test('Gemini verification elements never report a sorry block', async () => {
+  for (const markup of ['<form id="captcha-form"></form>', '<form action="/sorry/index"></form>',
+    '<iframe title="verification" src="https://www.google.com/recaptcha/api2/anchor"></iframe>']) {
+    const { page } = domPage(loggedIn + markup);
+    page.url = () => 'https://gemini.google.com/app';
+    const gemini = new Gemini(page);
+    const status = markup.startsWith('<iframe') ? 'challenge' : 'logged_in';
+    assert.equal((await gemini.auth()).status, status);
+    if (status === 'challenge') await assert.rejects(gemini.requireLogin(), { code: 'AUTH_CHALLENGE' });
+    else assert.equal((await gemini.requireLogin()).status, 'logged_in');
   }
 });
 

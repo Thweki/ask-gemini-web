@@ -31,6 +31,20 @@ test('discovery probes configured endpoint, common ports, process hints and DevT
   assert.deepEqual(tried, ['http://127.0.0.1:9222', 'http://127.0.0.1:9333']);
 }));
 
+test('IPv6 on a failed IPv4 port is still probed and reused without launching', async () => temporary(async cfg => {
+  const tried: string[] = [];
+  const config = { ...cfg, endpoint: 'http://127.0.0.1:9222' };
+  const discover = () => discoverEndpoint(config, {
+    ready: async endpoint => { tried.push(endpoint); return endpoint === 'http://[::1]:9222'; },
+    commonPorts: [9222], profiles: [], processes: noProcesses,
+    listening: async () => ['http://localhost:9222/', 'http://[::1]:9222/'],
+  });
+  assert.deepEqual(await startChrome(config, undefined, undefined, {
+    ready: endpointReady, discover, launch: async () => { assert.fail('IPv6 listener must prevent launch'); },
+  }), { started: false, endpoint: 'http://[::1]:9222' });
+  assert.deepEqual(tried, ['http://127.0.0.1:9222', 'http://[::1]:9222']);
+}));
+
 test('invalid/nonlocal candidates never reach the probe; missing and garbage DevTools files are skipped', async () => temporary(async cfg => {
   await writeFile(path.join(cfg.home, 'DevToolsActivePort'), 'http://example.com:9444\n');
   const tried: string[] = [];
@@ -243,12 +257,40 @@ test('Linux cmdline parser accepts rewritten argv, classic argv and quoted execu
   }
 });
 
-test('pure /proc listener discovery accepts only loopback TCP listeners owned by Chrome', async () => temporary(async cfg => {
+test('cmdline tokenization handles long whitespace runs in well under a second', () => {
+  const line = '/tmp/chrome' + ' '.repeat(32000) + 'x';
+  const start = performance.now();
+  assert.deepEqual(parseChromeCmdline(line + '\0'), [line]);
+  assert.ok(performance.now() - start < 500, 'Tokenization must not backtrack over whitespace');
+});
+
+test('NUL-separated profile values resembling flags remain intact', () => {
+  const args = ['/opt/google/chrome/chrome', '--user-data-dir=/tmp/a --remote-debugging-port=9555',
+    '--remote-debugging-port=9228'];
+  for (const trailing of ['', '\0']) {
+    const parsed = parseChromeCmdline(args.join('\0') + trailing);
+    assert.deepEqual(parsed, args);
+    assert.deepEqual(chromeProcessHints([parsed]), {
+      profiles: ['/tmp/a --remote-debugging-port=9555'], endpoints: ['http://127.0.0.1:9228'],
+    });
+  }
+});
+
+test('pure /proc discovery accepts only same-UID Chrome hints and loopback TCP listeners', async () => temporary(async cfg => {
   const proc = path.join(cfg.home, 'proc');
-  for (const [pid, name, inodes] of [['101', 'chrome', ['11', '12', '13', '14', '15']], ['102', 'node', ['16']]] as const) {
+  const uid = 1000;
+  for (const [pid, name, inodes, realUid] of [
+    ['101', 'chrome', ['11', '12', '13', '14', '15'], uid], ['102', 'node', ['16'], uid],
+    ['103', 'chrome', ['17'], uid + 1], ['104', 'chrome', ['18'], undefined],
+    ['105', 'chromium', ['19'], undefined],
+  ] as const) {
     const directory = path.join(proc, pid, 'fd');
     await mkdir(directory, { recursive: true });
     await writeFile(path.join(proc, pid, 'comm'), name + '\n');
+    if (realUid !== undefined) await writeFile(path.join(proc, pid, 'status'), `Name:\t${name}\nUid:\t${realUid}\t${uid}\t${uid}\t${uid}\n`);
+    if (pid === '105') await writeFile(path.join(proc, pid, 'status'), 'Uid: invalid\n');
+    const port = pid === '101' ? 9444 : pid === '103' ? 9555 : 9666;
+    await writeFile(path.join(proc, pid, 'cmdline'), [`/usr/bin/${name}`, `--remote-debugging-port=${port}`, `--user-data-dir=/tmp/${pid}`].join('\0') + '\0');
     for (const inode of inodes) await symlink(`socket:[${inode}]`, path.join(directory, inode));
   }
   await mkdir(path.join(proc, 'net'));
@@ -257,14 +299,20 @@ test('pure /proc listener discovery accepts only loopback TCP listeners owned by
   const loopback = os.endianness() === 'LE' ? '0100007F' : '7F000001';
   const ipv6 = os.endianness() === 'LE' ? '00000000000000000000000001000000' : '00000000000000000000000000000001';
   await writeFile(path.join(proc, 'net/tcp'), ['header', row(loopback, 9444, '11'), row('00000000', 9555, '12'),
-    row('0200000A', 9666, '13'), row(loopback, 9777, '14', '01'), row(loopback, 9888, '16')].join('\n'));
+    row('0200000A', 9666, '13'), row(loopback, 9777, '14', '01'), row(loopback, 9888, '16'),
+    row(loopback, 9555, '17'), row(loopback, 9666, '18'), row(loopback, 9777, '19')].join('\n'));
   await writeFile(path.join(proc, 'net/tcp6'), ['header', row(ipv6, 9999, '15'), row('00000000000000000000000000000000', 9222, '12')].join('\n'));
-  assert.deepEqual(await listeningChromeEndpoints('linux', proc), ['http://127.0.0.1:9444', 'http://[::1]:9999']);
+  assert.deepEqual(await listeningChromeEndpoints('linux', proc, uid), ['http://127.0.0.1:9444', 'http://[::1]:9999']);
   assert.deepEqual(await listeningChromeEndpoints('linux', path.join(proc, 'missing')), []);
   assert.deepEqual(await listeningChromeEndpoints('darwin', proc), []);
+  const noCommand = async (): Promise<never> => { assert.fail('Linux discovery must only read /proc'); };
+  assert.deepEqual(await processHints('linux', noCommand, proc, uid), {
+    profiles: ['/tmp/101'], endpoints: ['http://127.0.0.1:9444'],
+  });
+  assert.deepEqual(await processHints('linux', noCommand, path.join(proc, 'missing'), uid), { profiles: [], endpoints: [] });
 }));
 
-test('listener fallback follows process hints, skips tried ports and remote endpoints, and precedes launch', async () => temporary(async cfg => {
+test('listener fallback follows process hints, skips tried origins and remote endpoints, and precedes launch', async () => temporary(async cfg => {
   const tried: string[] = [];
   const discover = () => discoverEndpoint(cfg, {
     ready: async endpoint => { tried.push(endpoint); return endpoint.endsWith(':9444'); }, profiles: [],

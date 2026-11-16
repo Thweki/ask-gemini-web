@@ -69,14 +69,13 @@ export class Gemini {
     // Login URLs can carry account hints and redirect tokens in their query string.
     const url = parsed.origin + parsed.pathname;
     const result = (status: AuthStatus, reason: string): Auth => ({ status, reason, url });
-    if (parsed.hostname === 'google.com' || parsed.hostname.endsWith('.google.com')) {
+    // Gemini content can discuss traffic checks; only other Google hosts can
+    // report a sorry block, based on the URL or characteristic verification UI.
+    if (parsed.hostname !== 'gemini.google.com'
+      && (parsed.hostname === 'google.com' || parsed.hostname.endsWith('.google.com'))) {
       const sorryUrl = /^(?:www\.)?google\.com$/.test(parsed.hostname) && /^\/sorry(?:\/|$)/.test(parsed.pathname);
-      const text = sorryUrl ? '' : await this.page.locator('body').evaluate(element => {
-        const body = element.cloneNode(true) as Element;
-        body.querySelectorAll('model-response, user-query, script, style').forEach(node => node.remove());
-        return body.textContent || '';
-      });
-      if (sorryUrl || /unusual traffic|可疑流量|异常流量|異常流量/i.test(text)) {
+      const sorryForm = this.page.locator('#captcha-form, form[action*="/sorry/"], iframe[src*="recaptcha"]');
+      if (sorryUrl || await sorryForm.count()) {
         setPageAuthBlocked(this.page, true);
         return result('blocked_sorry', 'Google 检测到异常流量，请在该浏览器手动完成验证，或使用已经登录的浏览器；本工具不会处理验证码');
       }
