@@ -21,6 +21,9 @@ export const selectors = {
 
 export type AuthStatus = 'logged_in' | 'logged_out' | 'challenge' | 'consent_required' | 'restricted' | 'blocked_sorry' | 'unknown';
 export type Auth = { status: AuthStatus; reason: string; url: string };
+export function isGoogleSorryHost(hostname: string) {
+  return /^(?:(?:www|ipv4|ipv6)\.)?google\.(?:com|co\.[a-z]{2}|com\.[a-z]{2}|[a-z]{2})$/i.test(hostname);
+}
 export type Model = { id: string; name: string; mode?: string; description: string; availability: 'available' | 'unavailable'; selected: boolean; reason?: string };
 export type ThinkingOption = Model;
 const normalize = (text: string) => text.replace(/\s+/g, ' ').trim().toLocaleLowerCase();
@@ -69,21 +72,26 @@ export class Gemini {
     // Login URLs can carry account hints and redirect tokens in their query string.
     const url = parsed.origin + parsed.pathname;
     const result = (status: AuthStatus, reason: string): Auth => ({ status, reason, url });
-    // Gemini content can discuss traffic checks; only other Google hosts can
-    // report a sorry block, based on the URL or characteristic verification UI.
-    if (parsed.hostname !== 'gemini.google.com'
-      && (parsed.hostname === 'google.com' || parsed.hostname.endsWith('.google.com'))) {
-      const sorryUrl = /^(?:www\.)?google\.com$/.test(parsed.hostname) && /^\/sorry(?:\/|$)/.test(parsed.pathname);
-      const sorryForm = this.page.locator('#captcha-form, form[action*="/sorry/"], iframe[src*="recaptcha"]');
-      if (sorryUrl || await sorryForm.count()) {
-        setPageAuthBlocked(this.page, true);
-        return result('blocked_sorry', 'Google 检测到异常流量，请在该浏览器手动完成验证，或使用已经登录的浏览器；本工具不会处理验证码');
-      }
-    }
-    if (parsed.origin === 'https://accounts.google.com') {
+    // Account verification (including reCAPTCHA) belongs to the manual login flow.
+    if (parsed.hostname === 'accounts.google.com') {
       return /challenge|recovery|signin\/v2\/challenge/i.test(parsed.pathname)
         ? result('challenge', '请在 Google 页面手动完成验证')
         : result('logged_out', '请在 Google 官方页面手动登录');
+    }
+    // Gemini content and other Google services must never report a sorry block.
+    if (isGoogleSorryHost(parsed.hostname)) {
+      const sorryUrl = /^\/sorry(?:\/|$)/.test(parsed.pathname);
+      let blocked = sorryUrl;
+      if (!blocked) {
+        const matches = this.page.locator('#captcha-form, form[action*="/sorry/"], iframe[src*="recaptcha"]');
+        for (let i = 0; i < await matches.count(); i++) {
+          if (await matches.nth(i).isVisible()) { blocked = true; break; }
+        }
+      }
+      if (blocked) {
+        setPageAuthBlocked(this.page, true);
+        return result('blocked_sorry', 'Google 检测到异常流量，请在该浏览器手动完成验证，或使用已经登录的浏览器；本工具不会处理验证码');
+      }
     }
     if (!isGemini(url)) return result('unknown', '当前不是 Gemini 官方页面');
     const captcha = this.page.locator('iframe[src*="recaptcha"][title], iframe[title*="challenge"]');

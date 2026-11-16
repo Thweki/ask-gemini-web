@@ -79,20 +79,25 @@ export function chromeProcessHints(commandLines: string[][], platform = process.
 
 function chromeCommandLine(line: string) {
   const tokens: { value: string; start: number; end: number; quoted: boolean }[] = [];
+  const assignment = /--[\w-]+=/y;
   let index = 0;
   while (index < line.length) {
     if (/\s/.test(line[index])) { index++; continue; }
     const start = index, value: string[] = [];
+    // An inline flag's value can begin with a quote, just like a separate value.
+    assignment.lastIndex = index;
+    const prefix = assignment.exec(line)?.[0] || '';
+    index += prefix.length;
     let quote = '', quoted = false;
     while (index < line.length) {
       const char = line[index];
       if (!quote && /\s/.test(char)) break;
       if (char === quote) quote = '';
-      else if (!quote && (char === '"' || char === "'")) { quote = char; quoted = true; }
+      else if (!quote && !quoted && !value.length && (char === '"' || char === "'")) { quote = char; quoted = true; }
       else value.push(char);
       index++;
     }
-    tokens.push({ value: value.join(''), start, end: index, quoted });
+    tokens.push({ value: prefix + value.join(''), start, end: index, quoted });
   }
   const firstFlag = tokens.findIndex(token => token.value.startsWith('--'));
   if (firstFlag < 1) return [];
@@ -111,7 +116,8 @@ function chromeCommandLine(line: string) {
     let value = inline ? first.value.slice(flag.length + 1) : first.value;
     if (flag === '--user-data-dir' && !first.quoted) {
       let last = inline ? position : position + 1;
-      while (last + 1 < tokens.length && !tokens[last + 1].value.startsWith('--')) last++;
+      while (last + 1 < tokens.length && !tokens[last + 1].value.startsWith('-')
+        && !/^https?:\/\//i.test(tokens[last + 1].value)) last++;
       const start = first.start + (inline ? flag.length + 1 : 0);
       value = line.slice(start, tokens[last].end).trim();
     }
@@ -221,11 +227,8 @@ export async function discoverEndpoint(config: Settings, options: DiscoveryOptio
   const probe = async (input: string) => {
     let endpoint: string;
     try { endpoint = localEndpoint(input); } catch { return; }
-    const normalized = new URL(endpoint);
-    if (normalized.hostname === 'localhost') normalized.hostname = '127.0.0.1';
-    const key = normalized.origin;
-    if (tried.has(key)) return;
-    tried.add(key);
+    if (tried.has(endpoint)) return;
+    tried.add(endpoint);
     return await (options.ready || endpointReady)(endpoint) ? endpoint : undefined;
   };
   const configured = await probe(config.endpoint);

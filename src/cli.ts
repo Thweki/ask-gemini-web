@@ -4,8 +4,9 @@ import { copyFile, mkdir } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import path from 'node:path';
 import { settings } from './config.js';
-import { Connection, findChrome, pause, shutdown, startChrome } from './browser.js';
+import { Connection, findChrome, shutdown, startChrome } from './browser.js';
 import { Gemini } from './gemini.js';
+import { waitForLogin } from './login.js';
 import { previewSelection } from './selection.js';
 import { DraftError, errorInfo } from './errors.js';
 import { compileJob, decodeUtf8, execute, loadJob, parseJobJson, resume, runSummary, RunStore } from './jobs.js';
@@ -86,16 +87,9 @@ program.command('login').description('复用或启动 Chrome，由用户在 Goog
       if (!options.wait) { report({ ...started, next: 'ask-gemini-web auth status' }); return; }
       await page.bringToFront();
       const gemini = new Gemini(page);
-      const deadline = Date.now() + options.timeout * 1000;
-      let previous = '';
-      while (Date.now() < deadline) {
-        const auth = await gemini.auth();
-        if (auth.status === 'blocked_sorry') await gemini.requireLogin();
-        if (auth.status === 'logged_in') { loggedIn = true; report(auth); return; }
-        if (auth.status !== previous) { info(`${auth.status}：${auth.reason}`); previous = auth.status; }
-        await pause(1000);
-      }
-      throw new DraftError('LOGIN_TIMEOUT', '等待登录超时，Chrome 已保留。完成登录后运行 auth status。', 3);
+      const auth = await waitForLogin(gemini, options.timeout * 1000, auth => info(`${auth.status}：${auth.reason}`));
+      loggedIn = true;
+      report(auth);
     } finally { await connection.disconnect(!loggedIn); }
   }));
 

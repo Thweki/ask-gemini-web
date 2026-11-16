@@ -42,7 +42,34 @@ test('IPv6 on a failed IPv4 port is still probed and reused without launching', 
   assert.deepEqual(await startChrome(config, undefined, undefined, {
     ready: endpointReady, discover, launch: async () => { assert.fail('IPv6 listener must prevent launch'); },
   }), { started: false, endpoint: 'http://[::1]:9222' });
-  assert.deepEqual(tried, ['http://127.0.0.1:9222', 'http://[::1]:9222']);
+  assert.deepEqual(tried, ['http://127.0.0.1:9222', 'http://localhost:9222', 'http://[::1]:9222']);
+}));
+
+test('localhost and IPv4 are probed independently in either failure order without launching', async () => temporary(async cfg => {
+  for (const [failed, working] of [['127.0.0.1', 'localhost'], ['localhost', '127.0.0.1']]) {
+    const config = { ...cfg, endpoint: `http://${failed}:9222/` };
+    const tried: string[] = [];
+    const endpoint = `http://${working}:9222`;
+    const forbidden = async (): Promise<never> => assert.fail('Reachable candidate must prevent fallback or launch');
+    const discover = () => discoverEndpoint(config, {
+      ready: async input => { tried.push(input); return input === endpoint; }, commonPorts: [9222], profiles: [],
+      processes: async () => ({ profiles: [], endpoints: [endpoint] }), listening: forbidden,
+    });
+    assert.deepEqual(await startChrome(config, undefined, undefined, {
+      ready: endpointReady, discover, launch: forbidden,
+    }), { started: false, endpoint });
+    assert.deepEqual(tried, [`http://${failed}:9222`, endpoint]);
+  }
+}));
+
+test('only exact normalized origins are deduplicated across candidate sources', async () => temporary(async cfg => {
+  const tried: string[] = [];
+  assert.equal(await discoverEndpoint({ ...cfg, endpoint: 'http://LOCALHOST:80/' }, {
+    ready: async endpoint => { tried.push(endpoint); return false; }, commonPorts: [80], profiles: [],
+    processes: async () => ({ profiles: [], endpoints: ['http://localhost', 'http://127.0.0.1/', 'http://[::1]:80/'] }),
+    listening: async () => ['http://localhost:80/', 'http://127.0.0.1:80/', 'http://[::1]/'],
+  }), undefined);
+  assert.deepEqual(tried, ['http://localhost', 'http://127.0.0.1', 'http://[::1]']);
 }));
 
 test('invalid/nonlocal candidates never reach the probe; missing and garbage DevTools files are skipped', async () => temporary(async cfg => {
@@ -50,7 +77,9 @@ test('invalid/nonlocal candidates never reach the probe; missing and garbage Dev
   const tried: string[] = [];
   assert.equal(await discoverEndpoint({ ...cfg, endpoint: 'http://example.com:9222' }, {
     ready: async endpoint => { tried.push(endpoint); return false; }, listening: noListening, commonPorts: [], profiles: [cfg.home, cfg.profile],
-    processes: async () => ({ profiles: [], endpoints: ['http://user:pass@localhost:9444', 'http://example.com:9444'] }),
+    processes: async () => ({ profiles: [], endpoints: ['http://user:pass@localhost:9444', 'http://example.com:9444',
+      'https://localhost:9444', 'http://localhost:9444/path', 'http://localhost:9444?token=private',
+      'http://localhost:9444#token', 'not a URL'] }),
   }), undefined);
   assert.deepEqual(tried, []);
   for (const value of ['', 'garbage', '0', '65536', '-1', '9444x', 'http://localhost:9444']) assert.equal(devToolsEndpoint(value), undefined);
@@ -264,6 +293,25 @@ test('cmdline tokenization handles long whitespace runs in well under a second',
   assert.ok(performance.now() - start < 500, 'Tokenization must not backtrack over whitespace');
 });
 
+test('single-segment cmdlines keep mid-path quotes literal and stop unquoted profiles at URLs or flags', () => {
+  for (const separator of ['=', ' ']) {
+    for (const profile of ["/tmp/Jane's Profile", '/tmp/Jane"s Profile', '/tmp/Profile']) {
+      for (const tail of ['', ' https://gemini.google.com/app', ' http://localhost/start', ' -incognito']) {
+        const line = `/opt/google/chrome/chrome --user-data-dir${separator}${profile}${tail} --remote-debugging-port=9444`;
+        assert.deepEqual(chromeProcessHints([parseChromeCmdline(line + '\0')]), {
+          profiles: [profile], endpoints: ['http://127.0.0.1:9444'],
+        }, line);
+      }
+    }
+    for (const quote of ['"', "'"]) {
+      const line = `/opt/google/chrome/chrome --user-data-dir${separator}${quote}/tmp/Profile With Spaces${quote} https://gemini.google.com/app --remote-debugging-port=9444`;
+      assert.deepEqual(chromeProcessHints([parseChromeCmdline(line + '\0')]), {
+        profiles: ['/tmp/Profile With Spaces'], endpoints: ['http://127.0.0.1:9444'],
+      });
+    }
+  }
+});
+
 test('NUL-separated profile values resembling flags remain intact', () => {
   const args = ['/opt/google/chrome/chrome', '--user-data-dir=/tmp/a --remote-debugging-port=9555',
     '--remote-debugging-port=9228'];
@@ -274,6 +322,15 @@ test('NUL-separated profile values resembling flags remain intact', () => {
       profiles: ['/tmp/a --remote-debugging-port=9555'], endpoints: ['http://127.0.0.1:9228'],
     });
   }
+});
+
+test('NUL-separated profile values containing a URL remain intact', () => {
+  const args = ['/opt/google/chrome/chrome', '--user-data-dir', '/tmp/Profile https://example.com',
+    '--remote-debugging-port=9444'];
+  assert.deepEqual(parseChromeCmdline(args.join('\0') + '\0'), args);
+  assert.deepEqual(chromeProcessHints([parseChromeCmdline(args.join('\0'))]), {
+    profiles: ['/tmp/Profile https://example.com'], endpoints: ['http://127.0.0.1:9444'],
+  });
 });
 
 test('pure /proc discovery accepts only same-UID Chrome hints and loopback TCP listeners', async () => temporary(async cfg => {
@@ -326,5 +383,6 @@ test('listener fallback follows process hints, skips tried origins and remote en
     ready: endpointReady, discover, launch: async () => { assert.fail('Ready listening endpoint must prevent launch'); },
   });
   assert.deepEqual(result, { started: false, endpoint: 'http://127.0.0.1:9444' });
-  assert.deepEqual(tried, [9555, 9222, 9333, 9666, 9444].map(port => `http://127.0.0.1:${port}`));
+  assert.deepEqual(tried, [...[9555, 9222, 9333, 9666].map(port => `http://127.0.0.1:${port}`),
+    'http://localhost:9222', 'http://localhost:9666', 'http://127.0.0.1:9444']);
 }));

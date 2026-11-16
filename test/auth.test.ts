@@ -2,20 +2,35 @@ import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { chromium, type Browser, type BrowserContext } from 'playwright-core';
-import { Gemini } from '../src/gemini.js';
+import { Gemini, isGoogleSorryHost } from '../src/gemini.js';
 import { Connection } from '../src/browser.js';
+import { waitForLogin } from '../src/login.js';
 import { domPage } from './support/dom-page.js';
 
 const sorry = await readFile(new URL('./fixtures/google-sorry.html', import.meta.url), 'utf8');
 
-test('sorry URL or verification elements on non-Gemini Google hosts have a distinct auth error', async () => {
+const sorryHosts = ['google.com', 'google.co.jp', 'google.com.hk', 'google.co.uk', 'google.de']
+  .flatMap(host => ['', 'www.', 'ipv4.', 'ipv6.'].map(prefix => prefix + host));
+const verification = ['<form id="captcha-form"></form>', '<form action="/sorry/index"></form>',
+  '<iframe src="https://www.google.com/recaptcha/api2/anchor"></iframe>'];
+
+test('sorry host whitelist excludes account, Gemini, other services and lookalike hosts', () => {
+  for (const host of sorryHosts) assert.equal(isGoogleSorryHost(host), true, host);
+  for (const host of ['accounts.google.com', 'gemini.google.com', 'mail.google.com', 'docs.google.com',
+    'googleusercontent.com', 'google.com.evil.example', 'www.google.co.jp.evil.example',
+    'evilgoogle.com', 'www.ipv4.google.com', 'google.company', 'google.co.abc']) {
+    assert.equal(isGoogleSorryHost(host), false, host);
+  }
+});
+
+test('sorry URLs alone or visible verification elements on search hosts have a distinct auth error', async () => {
   for (const [url, html] of [
-    ['https://www.google.com/sorry/index?continue=private#token', '<body>Verification required</body>'],
+    ...sorryHosts.flatMap(host => ['/sorry', '/sorry/index'].map(path =>
+      [`https://${host}${path}?continue=private#token`, '<body>Verification required</body>'])),
     ['https://google.com/sorry', sorry],
-    ['https://accounts.google.com/signin', '<form id="captcha-form"></form>'],
-    ['https://www.google.com/search', '<div id="captcha-form"></div>'],
-    ['https://accounts.google.com/signin', '<form action="/sorry/index"></form>'],
-    ['https://www.google.com/search', '<iframe src="https://www.google.com/recaptcha/api2/anchor"></iframe>'],
+    ...['www.google.com', 'google.co.jp'].flatMap(host => verification.map(html => [`https://${host}/search`, html])),
+    ['https://www.google.com/search', verification.join('')],
+    ['https://www.google.com/search', `<div hidden>${verification[0]}</div>${verification[2]}`],
   ]) {
     const { page } = domPage(html);
     page.url = () => url;
@@ -33,6 +48,74 @@ test('sorry URL or verification elements on non-Gemini Google hosts have a disti
 });
 
 const loggedIn = '<button aria-label="Google Account">Account</button><textarea aria-label="Prompt"></textarea>';
+
+test('account pages are classified before any verification scan, regardless of visibility', async () => {
+  for (const [path, status] of [['/signin', 'logged_out'], ['/challenge', 'challenge'],
+    ['/signin/v2/challenge', 'challenge'], ['/recovery', 'challenge'], ['/sorry', 'logged_out']]) {
+    for (const markup of verification) {
+      for (const html of [markup, `<div hidden>${markup}</div>`, `<div style="display:none">${markup}</div>`]) {
+        const { page } = domPage(html);
+        page.url = () => `https://accounts.google.com${path}?login_hint=private#token`;
+        page.locator = () => assert.fail('Account classification must precede all element scans');
+        const gemini = new Gemini(page);
+        assert.equal((await gemini.auth()).status, status);
+        assert.equal((await gemini.waitForAuth(0)).status, status);
+        await assert.rejects(gemini.requireLogin(), { code: `AUTH_${status.toUpperCase()}`, exitCode: 3 });
+      }
+    }
+  }
+});
+
+test('hidden verification on search hosts and verification on unrelated hosts never report sorry blocks', async () => {
+  for (const host of sorryHosts) {
+    for (const markup of verification) {
+      for (const html of [`<div hidden>${markup}</div>`, `<div style="display:none">${markup}</div>`]) {
+        const { page } = domPage(html);
+        page.url = () => `https://${host}/search`;
+        assert.equal((await new Gemini(page).auth()).status, 'unknown');
+      }
+    }
+  }
+  for (const host of ['mail.google.com', 'docs.google.com', 'googleusercontent.com',
+    'google.com.evil.example', 'www.google.co.jp.evil.example']) {
+    const { page } = domPage(verification.join(''));
+    page.url = () => `https://${host}/sorry/index`;
+    assert.equal((await new Gemini(page).auth()).status, 'unknown');
+  }
+});
+
+test('CLI login polling survives account reCAPTCHA and optional challenge until logged in', async () => {
+  for (const hidden of [false, true]) {
+    for (const challenge of [false, true]) {
+      const markup = hidden ? `<div hidden>${verification.join('')}</div>` : verification.join('');
+      const { page, document } = domPage(markup);
+      const paths = ['/signin', ...(challenge ? ['/signin/v2/challenge'] : []), '/app'];
+      let stage = 0;
+      page.url = () => `https://${stage === paths.length - 1 ? 'gemini' : 'accounts'}.google.com${paths[stage]}`;
+      const gemini = new Gemini(page);
+      const requireLogin = mock.method(gemini, 'requireLogin');
+      const statuses: string[] = [];
+      const auth = await waitForLogin(gemini, 10000, auth => statuses.push(auth.status), async ms => {
+        assert.equal(ms, 1000);
+        assert.ok(++stage < paths.length, 'Login must finish on the Gemini page');
+        if (stage === paths.length - 1) document.body.innerHTML = loggedIn;
+      });
+      assert.equal(auth.status, 'logged_in');
+      assert.deepEqual(statuses, ['logged_out', ...(challenge ? ['challenge'] : [])]);
+      assert.equal(requireLogin.mock.callCount(), 0, 'Account verification must not take the fatal sorry path');
+      assert.equal((await gemini.requireLogin()).status, 'logged_in');
+    }
+  }
+});
+
+test('CLI login polling still fails closed on real sorry blocks and on timeout', async () => {
+  const { page } = domPage('');
+  page.url = () => 'https://ipv6.google.co.jp/sorry';
+  const gemini = new Gemini(page);
+  await assert.rejects(waitForLogin(gemini, 10000, undefined,
+    async () => assert.fail('Sorry blocks must stop polling')), { code: 'AUTH_BLOCKED_SORRY', exitCode: 3 });
+  await assert.rejects(waitForLogin(gemini, 0), { code: 'LOGIN_TIMEOUT', exitCode: 3 });
+});
 
 test('traffic text alone never reports a sorry block on Google hosts', async () => {
   for (const [url, html, status] of [
@@ -92,15 +175,19 @@ test('traffic phrases introduced after submission do not interrupt collection au
 });
 
 test('Gemini verification elements never report a sorry block', async () => {
-  for (const markup of ['<form id="captcha-form"></form>', '<form action="/sorry/index"></form>',
-    '<iframe title="verification" src="https://www.google.com/recaptcha/api2/anchor"></iframe>']) {
-    const { page } = domPage(loggedIn + markup);
-    page.url = () => 'https://gemini.google.com/app';
-    const gemini = new Gemini(page);
-    const status = markup.startsWith('<iframe') ? 'challenge' : 'logged_in';
-    assert.equal((await gemini.auth()).status, status);
-    if (status === 'challenge') await assert.rejects(gemini.requireLogin(), { code: 'AUTH_CHALLENGE' });
-    else assert.equal((await gemini.requireLogin()).status, 'logged_in');
+  for (const path of ['/app', '/sorry/index']) {
+    for (const markup of [...verification,
+      '<iframe title="verification" src="https://www.google.com/recaptcha/api2/anchor"></iframe>']) {
+      for (const hidden of [false, true]) {
+        const { page } = domPage(loggedIn + (hidden ? `<div hidden>${markup}</div>` : markup));
+        page.url = () => `https://gemini.google.com${path}`;
+        const gemini = new Gemini(page);
+        const status = !hidden && markup.includes('title="verification"') ? 'challenge' : 'logged_in';
+        assert.equal((await gemini.auth()).status, status);
+        if (status === 'challenge') await assert.rejects(gemini.requireLogin(), { code: 'AUTH_CHALLENGE' });
+        else assert.equal((await gemini.requireLogin()).status, 'logged_in');
+      }
+    }
   }
 });
 
