@@ -4,8 +4,9 @@ import { copyFile, mkdir } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import path from 'node:path';
 import { settings } from './config.js';
-import { Connection, findChrome, pause, shutdown, startChrome } from './browser.js';
+import { Connection, findChrome, shutdown, startChrome } from './browser.js';
 import { Gemini } from './gemini.js';
+import { waitForLogin } from './login.js';
 import { previewSelection } from './selection.js';
 import { DraftError, errorInfo } from './errors.js';
 import { compileJob, decodeUtf8, execute, loadJob, parseJobJson, resume, runSummary, RunStore } from './jobs.js';
@@ -22,6 +23,7 @@ if (/^gemini-draft(?:\.(?:mjs|js|cmd|exe))?$/.test(path.basename(process.argv[1]
 program.name('ask-gemini-web').version('0.2.1')
   .description('通过本机 Chrome CDP 复现 Gemini 网页写稿流程；运行时不调用额外模型 API。')
   .option('--cdp <url>', '本机 Chrome CDP 地址（默认使用保存的配置）')
+  .option('--remembered-cdp <url>', '安装保存的隐式 CDP 候选，不可达时继续发现')
   .option('--home <path>', '专用配置与任务数据目录')
   .option('--compact', '单行 JSON，适合 agent 调用')
   .option('--quiet', '隐藏进度信息（仍报告错误）')
@@ -33,7 +35,8 @@ const info = (message: string) => { if (!machineOutput() && !program.opts().quie
 function report(data: unknown) { console.log(JSON.stringify(data, null, program.opts().compact ? undefined : 2)); }
 async function connected<T>(action: (connection: Connection) => Promise<T>) {
   const connection = await Connection.ensure(config());
-  try { return await action(connection); } finally { await connection.disconnect(); }
+  try { return await action(connection); }
+  finally { await connection.disconnect(); }
 }
 async function locked<T>(action: () => Promise<T>) { return new RunStore(config()).lock(action); }
 function seconds(value: string) {
@@ -84,15 +87,9 @@ program.command('login').description('复用或启动 Chrome，由用户在 Goog
       if (!options.wait) { report({ ...started, next: 'ask-gemini-web auth status' }); return; }
       await page.bringToFront();
       const gemini = new Gemini(page);
-      const deadline = Date.now() + options.timeout * 1000;
-      let previous = '';
-      while (Date.now() < deadline) {
-        const auth = await gemini.auth();
-        if (auth.status === 'logged_in') { loggedIn = true; report(auth); return; }
-        if (auth.status !== previous) { info(`${auth.status}：${auth.reason}`); previous = auth.status; }
-        await pause(1000);
-      }
-      throw new DraftError('LOGIN_TIMEOUT', '等待登录超时，Chrome 已保留。完成登录后运行 auth status。', 3);
+      const auth = await waitForLogin(gemini, options.timeout * 1000, auth => info(`${auth.status}：${auth.reason}`));
+      loggedIn = true;
+      report(auth);
     } finally { await connection.disconnect(!loggedIn); }
   }));
 

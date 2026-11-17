@@ -1,4 +1,4 @@
-import { access, chmod, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, readFile, readdir, readlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import { createServer } from 'node:net';
 import { execFile, spawn } from 'node:child_process';
@@ -78,29 +78,117 @@ export function chromeProcessHints(commandLines: string[][], platform = process.
 }
 
 function chromeCommandLine(line: string) {
-  const match = line.trim().match(/^"?(.*?[\\/](?:Google Chrome|Chromium|chrome\.exe|chromium\.exe))"?(?=\s|$)(.*)$/i);
-  if (!match) return [];
-  // ps can print unquoted paths with spaces; those end at the next switch.
-  // Quoted values end at their closing quote, even before a positional URL.
-  const args = [match[1]];
+  const tokens: { value: string; start: number; end: number; quoted: boolean }[] = [];
+  const assignment = /--[\w-]+=/y;
+  let index = 0;
+  while (index < line.length) {
+    if (/\s/.test(line[index])) { index++; continue; }
+    const start = index, value: string[] = [];
+    // An inline flag's value can begin with a quote, just like a separate value.
+    assignment.lastIndex = index;
+    const prefix = assignment.exec(line)?.[0] || '';
+    index += prefix.length;
+    let quote = '', quoted = false;
+    while (index < line.length) {
+      const char = line[index];
+      if (!quote && /\s/.test(char)) break;
+      if (char === quote) quote = '';
+      else if (!quote && !quoted && !value.length && (char === '"' || char === "'")) { quote = char; quoted = true; }
+      else value.push(char);
+      index++;
+    }
+    tokens.push({ value: prefix + value.join(''), start, end: index, quoted });
+  }
+  const firstFlag = tokens.findIndex(token => token.value.startsWith('--'));
+  if (firstFlag < 1) return [];
+  // ps can print unquoted executable/profile paths with spaces. Token offsets
+  // preserve those paths, while quotes keep a following positional URL separate.
+  const executable = firstFlag === 1 ? tokens[0].value : line.slice(0, tokens[firstFlag].start).trim();
+  const args = [executable];
   for (const flag of ['--user-data-dir', '--remote-debugging-address', '--remote-debugging-port']) {
-    const boundary = flag === '--user-data-dir' ? '(?=\\s+"?--|$)' : '(?=\\s|$)';
-    const value = match[2].match(new RegExp(`(?:^|\\s)"?${flag}(?:=|\\s+)(?:"([^"]*)"|'([^']*)'|([^"'\\s].*?)${boundary})`));
-    if (value) args.push(`${flag}=${(value[1] ?? value[2] ?? value[3]).replace(/"$/, '').trim()}`);
+    const position = tokens.findIndex((token, index) => index >= firstFlag
+      && (token.value === flag || token.value.startsWith(`${flag}=`)));
+    if (position < 0) continue;
+    const token = tokens[position];
+    const inline = token.value.startsWith(`${flag}=`);
+    const first = inline ? token : tokens[position + 1];
+    if (!first || (!inline && first.value.startsWith('--'))) continue;
+    let value = inline ? first.value.slice(flag.length + 1) : first.value;
+    if (flag === '--user-data-dir' && !first.quoted) {
+      let last = inline ? position : position + 1;
+      while (last + 1 < tokens.length && !tokens[last + 1].value.startsWith('-')
+        && !/^https?:\/\//i.test(tokens[last + 1].value)) last++;
+      const start = first.start + (inline ? flag.length + 1 : 0);
+      value = line.slice(start, tokens[last].end).trim();
+    }
+    args.push(`${flag}=${value}`);
   }
   return args;
 }
 
+// Chrome on Linux can rewrite argv into one space-joined segment. Normal argv
+// must stay intact: a profile value can itself contain text resembling flags.
+export function parseChromeCmdline(command: string) {
+  const args = command.split('\0').filter(Boolean);
+  if (args.length !== 1) return args;
+  const parsed = chromeCommandLine(args[0]);
+  return parsed.length && /chrome|chromium/i.test(path.basename(parsed[0])) ? parsed : args;
+}
+
+async function sameUid(directory: string, uid: number | undefined) {
+  if (uid === undefined) return false;
+  const status = await readFile(path.join(directory, 'status'), 'utf8').catch(() => '');
+  const realUid = status.match(/^Uid:\s+(\d+)(?:\s|$)/m)?.[1];
+  return realUid !== undefined && Number(realUid) === uid;
+}
+
+// Optional on other platforms. Linux needs no external commands or CDP attachment.
+export async function listeningChromeEndpoints(platform = process.platform, proc = '/proc', uid = process.getuid?.()) {
+  if (platform !== 'linux') return [];
+  const pids = await readdir(proc).catch(() => [] as string[]);
+  const sockets = new Set<string>();
+  for (const pid of pids.filter(pid => /^\d+$/.test(pid))) {
+    if (!await sameUid(path.join(proc, pid), uid)) continue;
+    const name = (await readFile(path.join(proc, pid, 'comm'), 'utf8').catch(() => '')).trim();
+    if (!/^(?:chrome|chromium|google-chrome)(?:-browser|-stable|-beta|-unstable)?$/i.test(name)) continue;
+    const directory = path.join(proc, pid, 'fd');
+    const fds = await readdir(directory).catch(() => [] as string[]);
+    for (const fd of fds) {
+      const target = await readlink(path.join(directory, fd)).catch(() => '');
+      const inode = target.match(/^socket:\[(\d+)\]$/)?.[1];
+      if (inode) sockets.add(inode);
+    }
+  }
+  const endpoints = new Set<string>();
+  for (const file of ['tcp', 'tcp6']) {
+    const contents = await readFile(path.join(proc, 'net', file), 'utf8').catch(() => '');
+    for (const line of contents.trim().split('\n').slice(1)) {
+      const fields = line.trim().split(/\s+/);
+      if (fields[3] !== '0A' || !sockets.has(fields[9])) continue;
+      const [address, hexPort] = (fields[1] || '').split(':');
+      const loopback = file === 'tcp'
+        ? os.endianness() === 'LE' ? '0100007F' : '7F000001'
+        : os.endianness() === 'LE' ? '00000000000000000000000001000000' : '00000000000000000000000000000001';
+      if (address !== loopback || !/^[0-9A-F]{4}$/i.test(hexPort || '')) continue;
+      const port = parseInt(hexPort, 16);
+      if (port) endpoints.add(`http://${file === 'tcp' ? '127.0.0.1' : '[::1]'}:${port}`);
+    }
+  }
+  return [...endpoints];
+}
+
 export async function processHints(platform = process.platform,
-  command = async (file: string, args: string[]) => (await promisify(execFile)(file, args, { timeout: 2000, maxBuffer: 4 * 1024 * 1024 })).stdout) {
+  command = async (file: string, args: string[]) => (await promisify(execFile)(file, args, { timeout: 2000, maxBuffer: 4 * 1024 * 1024 })).stdout,
+  proc = '/proc', uid = process.getuid?.()) {
   let lines: string[][] = [];
   if (platform === 'linux') {
-    const pids = await readdir('/proc').catch(() => [] as string[]);
+    const pids = await readdir(proc).catch(() => [] as string[]);
     lines = await Promise.all(pids.filter(pid => /^\d+$/.test(pid)).map(async pid => {
-      const name = await readFile(`/proc/${pid}/comm`, 'utf8').catch(() => '');
+      if (!await sameUid(path.join(proc, pid), uid)) return [];
+      const name = await readFile(path.join(proc, pid, 'comm'), 'utf8').catch(() => '');
       if (!/chrome|chromium/i.test(name)) return [];
-      const command = await readFile(`/proc/${pid}/cmdline`, 'utf8').catch(() => '');
-      return command.split('\0').filter(Boolean);
+      const command = await readFile(path.join(proc, pid, 'cmdline'), 'utf8').catch(() => '');
+      return parseChromeCmdline(command);
     }));
   } else if (platform === 'darwin') {
     const output = await command('ps', ['-ax', '-o', 'command=']).catch(() => '');
@@ -129,6 +217,7 @@ export function profileLocations(config: Settings, platform = process.platform, 
 export type DiscoveryOptions = {
   ready?: typeof endpointReady;
   commonPorts?: number[];
+  listening?: () => Promise<string[]>;
   profiles?: string[];
   processes?: () => Promise<ReturnType<typeof chromeProcessHints>>;
 };
@@ -138,9 +227,8 @@ export async function discoverEndpoint(config: Settings, options: DiscoveryOptio
   const probe = async (input: string) => {
     let endpoint: string;
     try { endpoint = localEndpoint(input); } catch { return; }
-    const key = endpoint;
-    if (tried.has(key)) return;
-    tried.add(key);
+    if (tried.has(endpoint)) return;
+    tried.add(endpoint);
     return await (options.ready || endpointReady)(endpoint) ? endpoint : undefined;
   };
   const configured = await probe(config.endpoint);
@@ -159,6 +247,10 @@ export async function discoverEndpoint(config: Settings, options: DiscoveryOptio
     const contents = await readFile(path.join(profile, 'DevToolsActivePort'), 'utf8').catch(() => '');
     const input = devToolsEndpoint(contents);
     if (!input) continue;
+    const endpoint = await probe(input);
+    if (endpoint) return endpoint;
+  }
+  for (const input of await (options.listening || listeningChromeEndpoints)()) {
     const endpoint = await probe(input);
     if (endpoint) return endpoint;
   }
@@ -231,6 +323,11 @@ export async function startChrome(config: Settings, executable?: string, initial
 }
 
 const endpoints = new WeakMap<Page, string>();
+const authBlockedPages = new WeakSet<Page>();
+export function setPageAuthBlocked(page: Page, blocked: boolean) {
+  if (blocked) authBlockedPages.add(page);
+  else authBlockedPages.delete(page);
+}
 export const pageEndpoint = (page: Page) => endpoints.get(page);
 
 export class Connection {
@@ -281,7 +378,7 @@ export class Connection {
   }
   async disconnect(keepPages = false) {
     try {
-      if (!keepPages) await Promise.all([...this.pages].map(page => page.close().catch(() => {})));
+      if (!keepPages) await Promise.all([...this.pages].filter(page => !authBlockedPages.has(page)).map(page => page.close().catch(() => {})));
     } finally {
       this.pages.clear();
       // A CDP Browser.close() disconnects without terminating Chrome.

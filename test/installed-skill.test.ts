@@ -109,7 +109,7 @@ test('old unmarked installed connections stay implicit before and after update',
       const result = await run(runner);
       assert.equal(result.status, 1, result.stderr);
       assert.equal(JSON.parse(result.stdout).error.code, 'CHROME_NOT_FOUND');
-      assert.deepEqual(result.probes, [down, 'http://127.0.0.1:9222', 'http://127.0.0.1:9333'].map(probe));
+      assert.deepEqual(result.probes, [old.endpoint, 'http://127.0.0.1:9222', 'http://127.0.0.1:9333'].map(probe));
     }
   }
   // A later command-line choice still overrides an implicit installation.

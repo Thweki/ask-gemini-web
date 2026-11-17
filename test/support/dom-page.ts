@@ -1,7 +1,7 @@
 import { createWindow } from '@mixmark-io/domino';
 import type { Locator, Page } from 'playwright-core';
 
-// A small fixture driver for menu logic when the sandbox cannot launch Chrome.
+// A small fixture driver for auth/menu logic when the sandbox cannot launch Chrome.
 // Browser tests exercise the same fixtures through Playwright's actual locators.
 export function domPage(html: string) {
   const window = createWindow(html);
@@ -42,6 +42,8 @@ export function domPage(html: string) {
     }
     locator(selector: string): DomLocator { return locate(this.resolve, selector); }
     filter({ hasText }: { hasText: RegExp }) { return new DomLocator(() => this.resolve().filter(element => hasText.test(innerText(element)))); }
+    and(other: DomLocator) { return new DomLocator(() => this.resolve().filter(element => other.resolve().includes(element))); }
+    or(other: DomLocator) { return new DomLocator(() => [...new Set([...this.resolve(), ...other.resolve()])]); }
     async count() { return this.resolve().length; }
     nth(index: number) { return new DomLocator(() => this.resolve().slice(index, index + 1)); }
     first() { return this.nth(0); }
@@ -69,6 +71,11 @@ export function domPage(html: string) {
   const page = {
     setDefaultTimeout() {},
     locator: (selector: string) => locate(() => [document], selector),
+    getByRole: (role: string, options?: { name: RegExp }) => {
+      const implicit: Record<string, string> = { button: 'button', link: 'a[href]', heading: 'h1, h2, h3, h4, h5, h6' };
+      return new DomLocator(() => Array.from(document.querySelectorAll(`[role="${role}"]${implicit[role] ? `, ${implicit[role]}` : ''}`))
+        .filter(element => !options?.name || options.name.test(element.getAttribute('aria-label') || innerText(element))));
+    },
     keyboard: { press: async (key: string) => {
       const event = new window.Event('keydown');
       Object.defineProperty(event, 'key', { value: key }); document.dispatchEvent(event);
